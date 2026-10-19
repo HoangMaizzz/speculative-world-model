@@ -21,7 +21,7 @@ URL = "https://github.com/HoangMaizzz/speculative-world-model.git"
 os.environ.update(HF_HOME="/tmp/suffix-hf-cache", TOKENIZERS_PARALLELISM="false",
                   HF_HUB_DISABLE_TELEMETRY="1", MPLCONFIGDIR="/tmp/suffix-mpl")
 ''',
-'''# 2. Clone private repo using Kaggle Secrets; token never enters the URL/config file
+'''# 2. Clone public repo without a token; optional Secret fallback for private repos
 from kaggle_secrets import UserSecretsClient
 import base64
 secrets = UserSecretsClient()
@@ -32,21 +32,24 @@ try:
 except Exception:
     pass  # All three model repositories are public.
 if not REPO.exists():
-    try:
-        token = secrets.get_secret("GITHUB_TOKEN")
-    except Exception:
-        raise RuntimeError("Add and enable Kaggle Secret GITHUB_TOKEN with read access to this private repository.") from None
     git_env = os.environ.copy()
-    git_env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.https://github.com/.extraheader",
-        GIT_CONFIG_VALUE_0="AUTHORIZATION: basic " + base64.b64encode(("x-access-token:"+token).encode()).decode(),
-        GIT_TERMINAL_PROMPT="0", GIT_TRACE="0", GIT_CURL_VERBOSE="0")
-    try:
-        result = subprocess.run(["git", "clone", "--branch", BRANCH, "--single-branch", URL, str(REPO)],
-                                env=git_env, capture_output=True, text=True)
-        if result.returncode:
-            raise RuntimeError("Private clone failed. Check GITHUB_TOKEN repository access and Kaggle Internet.")
-    finally:
-        del token, git_env
+    git_env.update(GIT_TERMINAL_PROMPT="0", GIT_TRACE="0", GIT_CURL_VERBOSE="0")
+    clone_args = ["git", "clone", "--branch", BRANCH, "--single-branch", URL, str(REPO)]
+    result = subprocess.run(clone_args, env=git_env, capture_output=True, text=True)
+    if result.returncode:
+        try:
+            token = secrets.get_secret("GITHUB_TOKEN")
+        except Exception:
+            raise RuntimeError("Clone failed. Check Kaggle Internet and repository visibility; a private repo needs Kaggle Secret GITHUB_TOKEN.") from None
+        git_env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.https://github.com/.extraheader",
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic " + base64.b64encode(("x-access-token:"+token).encode()).decode())
+        try:
+            result = subprocess.run(clone_args, env=git_env, capture_output=True, text=True)
+            if result.returncode:
+                raise RuntimeError("Private clone failed. Check token repository access and Kaggle Internet.")
+        finally:
+            del token
+    del git_env
 assert subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=REPO, text=True).strip() == URL
 COMMIT = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip()
 print("Experiment commit:", COMMIT)
@@ -149,8 +152,8 @@ def build():
     destination = ROOT / "notebooks"
     destination.mkdir(exist_ok=True)
     intro = ("# Kaggle: suffix diagnostics, 100 MATH-500 + 100 GSM8K\n\n"
-             "Enable Internet and GPU T4 x2. Add Kaggle Secret `GITHUB_TOKEN` with read access "
-             "to the private repo and enable notebook access. `HF_TOKEN` is optional. Run cells in order. "
+             "Enable Internet and GPU T4 x2. Public repositories clone without a GitHub token. "
+             "Only if the repo is private, add and enable Kaggle Secret `GITHUB_TOKEN` with read access. `HF_TOKEN` is optional. Run cells in order. "
              "The first smoke uses 5 prompts per dataset, then the pilot uses exactly 100 per dataset. "
              "Downloading models needs disk space in /tmp. A 6-hour soft run budget can require multiple sessions.\n")
     notebook = {"nbformat": 4, "nbformat_minor": 5,

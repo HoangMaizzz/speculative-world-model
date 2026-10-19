@@ -15,7 +15,7 @@ Vòng đầu: **100 MATH-500 + 100 GSM8K**, seed 42. Tối đa 5 shared prefixes
 ## Chạy trên Kaggle
 
 1. Notebook Settings: **Internet ON, GPU T4 x2**.
-2. Add/enable Kaggle Secret **GITHUB_TOKEN** có quyền đọc private repo. Không dán token vào cell. HF_TOKEN tùy chọn.
+2. Repo public: không cần GitHub token. Nếu repo vẫn private: add/enable Kaggle Secret **GITHUB_TOKEN** có quyền đọc repo. Không dán token vào cell. HF_TOKEN tùy chọn.
 3. Import [notebooks/math_gsm8k.ipynb](notebooks/math_gsm8k.ipynb), hoặc copy **toàn bộ 7 cells** từ [KAGGLE_CELLS.md](KAGGLE_CELLS.md), chạy theo thứ tự.
 4. Cell 5 chạy CPU audits, pretrained GPU preflight và smoke 5+5. Chỉ chạy cell 6 sau khi smoke hoàn tất.
 5. Cell 6 chạy pilot 100+100 và tự checkpoint; rerun cell này để tiếp tục khi đạt soft budget. Cell 7 hiện report, đủ 10 plots và ZIP.
