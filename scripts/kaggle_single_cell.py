@@ -9,6 +9,45 @@ URL = "https://github.com/HoangMaizzz/speculative-world-model.git"
 BRANCH = "codex/suffix-top1-math-gsm8k"
 
 
+def setup_command(args, log_path):
+    """Print and preserve setup output, including the real venv/pip failure."""
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    print("Setup:", " ".join(map(str, args)), flush=True)
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write("\n$ "+" ".join(map(str, args))+"\n")
+        with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, encoding="utf-8", errors="replace", bufsize=1) as process:
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                log.write(line)
+                log.flush()
+            code = process.wait()
+    if code:
+        raise RuntimeError(f"Setup failed (exit {code}). Full log: {log_path}. See the actual error printed above.")
+
+
+def ensure_environment(venv, log_path, run_setup=setup_command, probe=subprocess.run, base_python=sys.executable):
+    """Repair partial venvs without invoking ensurepip or changing system packages."""
+    venv = Path(venv)
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not python.exists() or not (venv/"pyvenv.cfg").exists():
+        # Python 3.13 in some Kaggle images has venv but omits ensurepip.
+        run_setup([base_python, "-m", "venv", "--without-pip", str(venv)], log_path)
+    if probe([str(python), "-c", "import sys; print(sys.version)"],
+             capture_output=True, text=True).returncode:
+        raise RuntimeError(f"Virtual environment interpreter is not usable: {python}; no files were deleted.")
+    if probe([str(python), "-m", "pip", "--version"], capture_output=True, text=True).returncode:
+        host = probe([base_python, "-m", "pip", "--version"], capture_output=True, text=True)
+        if host.returncode:
+            raise RuntimeError("Notebook Python has no pip. Capture this output and the Kaggle image/Python version; no system packages were changed.")
+        # pip --python explicitly supports environments where pip is absent.
+        run_setup([base_python, "-m", "pip", "--python", str(python), "install",
+                   "--no-cache-dir", "pip==25.2"], log_path)
+    run_setup([str(python), "-m", "pip", "--version"], log_path)
+    return python
+
+
 def check_gpus():
     import torch
     if torch.cuda.device_count() < 2:
@@ -50,16 +89,16 @@ def launch(mode, revision):
         raise RuntimeError("Existing checkout differs; it was preserved. Use the matching launcher revision.")
     print("Experiment source:", head, "mode:", mode, flush=True)
     venv = Path("/tmp/suffix-venv")
-    python = venv / "bin/python"
-    if not python.exists():
-        subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+    setup_log = work / ("suffix_setup_"+mode+".log")
+    print("Notebook Python:", sys.executable, sys.version, "Setup log:", setup_log, flush=True)
+    python = ensure_environment(venv, setup_log)
     stamp = venv / "suffix-installed-commit"
     if not stamp.exists() or stamp.read_text() != revision:
-        subprocess.run([str(python), "-m", "pip", "install", "--no-cache-dir", "--progress-bar", "off",
-                        "torch==2.9.0", "--index-url", "https://download.pytorch.org/whl/cu126"], check=True)
-        subprocess.run([str(python), "-m", "pip", "install", "--no-cache-dir", "--progress-bar", "off",
-                        "-r", str(repo/"requirements-kaggle.txt")], check=True)
-        subprocess.run([str(python), "-m", "pip", "install", "--no-deps", "-e", str(repo)], check=True)
+        setup_command([str(python), "-m", "pip", "install", "--no-cache-dir", "--progress-bar", "off",
+                       "torch==2.9.0", "--index-url", "https://download.pytorch.org/whl/cu126"], setup_log)
+        setup_command([str(python), "-m", "pip", "install", "--no-cache-dir", "--progress-bar", "off",
+                       "-r", str(repo/"requirements-kaggle.txt")], setup_log)
+        setup_command([str(python), "-m", "pip", "install", "--no-deps", "-e", str(repo)], setup_log)
         stamp.write_text(revision)
     subprocess.run([str(python), "-c", "import torch; assert torch.cuda.device_count() >= 2; print(torch.__version__, torch.version.cuda)"], check=True)
     # Distinct output roots prevent a new code revision from mixing older results.
