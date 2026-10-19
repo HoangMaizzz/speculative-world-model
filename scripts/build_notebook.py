@@ -169,7 +169,8 @@ assert callable(globals().get("lab")), "Setup did not define lab; inspect the pr
 '''
 
 SINGLE_CELL_REVISION = "c4a25fafcdd66884c33ef7251f14a6bc6874a388"
-SINGLE_CELL_SHA256 = "d09babf75c46c32a6871c800a470be82b9593748968880a41e4a83b65f9b702e"
+SINGLE_CELL_LAUNCHER_REVISION = "8fab80c128f4eedf7c8996b6b803afdb412fe3fc"
+SINGLE_CELL_SHA256 = "c3885f4767ffe1c138f34a0f555edd7de4f2d63b442d05f2bbc813183ada5ca5"
 
 
 def single_cell(mode):
@@ -185,9 +186,10 @@ if torch.cuda.device_count() < 2:
     raise RuntimeError("Select GPU T4 x2 and enable Internet in Kaggle Settings.")
 
 _suffix_revision = "{SINGLE_CELL_REVISION}"
+_suffix_launcher_revision = "{SINGLE_CELL_LAUNCHER_REVISION}"
 _suffix_url = (
     "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
-    + _suffix_revision + "/scripts/kaggle_single_cell.py"
+    + _suffix_launcher_revision + "/scripts/kaggle_single_cell.py"
 )
 with urllib.request.urlopen(_suffix_url, timeout=60) as response:
     _suffix_source = response.read()

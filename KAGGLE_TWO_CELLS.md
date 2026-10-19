@@ -12,13 +12,14 @@ if torch.cuda.device_count() < 2:
     raise RuntimeError("Select GPU T4 x2 and enable Internet in Kaggle Settings.")
 
 _suffix_revision = "c4a25fafcdd66884c33ef7251f14a6bc6874a388"
+_suffix_launcher_revision = "8fab80c128f4eedf7c8996b6b803afdb412fe3fc"
 _suffix_url = (
     "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
-    + _suffix_revision + "/scripts/kaggle_single_cell.py"
+    + _suffix_launcher_revision + "/scripts/kaggle_single_cell.py"
 )
 with urllib.request.urlopen(_suffix_url, timeout=60) as response:
     _suffix_source = response.read()
-if hashlib.sha256(_suffix_source).hexdigest() != "d09babf75c46c32a6871c800a470be82b9593748968880a41e4a83b65f9b702e":
+if hashlib.sha256(_suffix_source).hexdigest() != "c3885f4767ffe1c138f34a0f555edd7de4f2d63b442d05f2bbc813183ada5ca5":
     raise RuntimeError("Launcher checksum differs; execution stopped.")
 _suffix_scope = {"__name__": "__main__", "__file__": _suffix_url,
                  "SUFFIX_MODE": "smoke", "SUFFIX_CODE_REVISION": _suffix_revision}
@@ -35,13 +36,14 @@ if torch.cuda.device_count() < 2:
     raise RuntimeError("Select GPU T4 x2 and enable Internet in Kaggle Settings.")
 
 _suffix_revision = "c4a25fafcdd66884c33ef7251f14a6bc6874a388"
+_suffix_launcher_revision = "8fab80c128f4eedf7c8996b6b803afdb412fe3fc"
 _suffix_url = (
     "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
-    + _suffix_revision + "/scripts/kaggle_single_cell.py"
+    + _suffix_launcher_revision + "/scripts/kaggle_single_cell.py"
 )
 with urllib.request.urlopen(_suffix_url, timeout=60) as response:
     _suffix_source = response.read()
-if hashlib.sha256(_suffix_source).hexdigest() != "d09babf75c46c32a6871c800a470be82b9593748968880a41e4a83b65f9b702e":
+if hashlib.sha256(_suffix_source).hexdigest() != "c3885f4767ffe1c138f34a0f555edd7de4f2d63b442d05f2bbc813183ada5ca5":
     raise RuntimeError("Launcher checksum differs; execution stopped.")
 _suffix_scope = {"__name__": "__main__", "__file__": _suffix_url,
                  "SUFFIX_MODE": "pilot", "SUFFIX_CODE_REVISION": _suffix_revision}

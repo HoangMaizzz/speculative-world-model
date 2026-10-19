@@ -60,11 +60,12 @@ class ArtifactTests(unittest.TestCase):
         for mode in ("smoke", "pilot"):
             namespace = {}
             with patch.dict("sys.modules", {"torch": fake_torch}), \
-                 patch("urllib.request.urlopen", return_value=io.BytesIO(payload)), \
+                 patch("urllib.request.urlopen", return_value=io.BytesIO(payload)) as download, \
                  patch("hashlib.sha256", return_value=SimpleNamespace(hexdigest=lambda: module.SINGLE_CELL_SHA256)):
                 exec(compile(module.single_cell(mode), mode, "exec"), namespace)
             self.assertEqual(namespace["_suffix_scope"]["observed_mode"], mode)
             self.assertEqual(namespace["_suffix_scope"]["observed_revision"], module.SINGLE_CELL_REVISION)
+            self.assertIn(module.SINGLE_CELL_LAUNCHER_REVISION, download.call_args.args[0])
 
     def test_standalone_checksum_matches_the_reviewed_launcher(self):
         module = self.builder()

@@ -21,6 +21,8 @@ Vòng đầu: **100 MATH-500 + 100 GSM8K**, seed 42. Tối đa 5 shared prefixes
 5. Cả hai bản tự xuất ZIP/report/10plots, phân biệt complete/partial/failed và khôi phục ZIP đúng mode/config/commit được attach vào `/kaggle/input`. Kết quả cũ khác code revision được giữ nguyên; launcher chọn output riêng cho revision mới. Phiên Save Version không dùng biến/cache RAM của phiên interactive.
 Notebook7cell cũ vẫn được giữ để xem chi tiết từng giai đoạn. Bản một cell dùng runtime/source commit cố định `c4a25fafcdd66884c33ef7251f14a6bc6874a388`, kiểm SHA256 launcher trước khi thực thi; không lấy code mới tùy theo branch head khi Save Version chạy sau này.
 
+Launcher setup được pin riêng tại `8fab80c128f4eedf7c8996b6b803afdb412fe3fc`: hỗ trợ Kaggle Python3.13 thiếu `ensurepip`, tạo venv bằng `--without-pip`, seed pip bằng `pip --python`, và sửa venv tạo dở thiếu pip. Không cài vào Python hệ thống. Log setup được in trực tiếp và lưu tại `/kaggle/working/suffix_setup_smoke.log` hoặc `suffix_setup_pilot.log`. Runtime thí nghiệm vẫn giữ nguyên revisionc4a25faf nên kết quả không bị đổi protocol bởi bản sửa installer.
+
 Notebook dùng môi trường riêng trong `/tmp`, Torch 2.9.0 CUDA12.6 và dependency pins để tránh package đã import trong Kaggle kernel. Model cache trong `/tmp`, không nằm trong artifact. Commit thực tế, package versions, precision và GPU được ghi vào identity.
 
 ## Lệnh tương đương
