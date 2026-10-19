@@ -147,6 +147,41 @@ display(FileLink(str(WORK / "suffix_smoke/suffix_checkpoint.zip")))
 ]
 
 
+# Each quickstart cell can restore the setup namespace after a kernel restart.
+# Only the three reviewed setup cells are loaded from this immutable revision.
+SETUP_BOOTSTRAP = '''import json, os, subprocess
+from pathlib import Path
+import urllib.request
+
+if not (callable(globals().get("lab")) and
+        all(name in globals() for name in ("PY", "REPO", "WORK", "COMMIT"))):
+    setup_url = (
+        "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
+        "bc04842857cb5d739f89c9c9bc5acfbf5bd8254b/notebooks/math_gsm8k.ipynb"
+    )
+    with urllib.request.urlopen(setup_url, timeout=60) as response:
+        setup_notebook = json.load(response)
+    setup_cells = [c for c in setup_notebook["cells"] if c["cell_type"] == "code"]
+    for index, cell in enumerate(setup_cells[:3], start=1):
+        print(f"Setup {index}/3", flush=True)
+        exec(compile("".join(cell["source"]), f"setup-cell-{index}", "exec"), globals())
+assert callable(globals().get("lab")), "Setup did not define lab; inspect the preceding error."
+'''
+
+QUICK_CELLS = [
+    SETUP_BOOTSTRAP + '\n# Smoke: setup automatically, prepare 5+5, audit, then run both studies.\n'
+    + 'lab("prepare", smoke=True)\n'
+    + CELLS[4].replace('/tmp/suffix-assets/pilot/manifest.json', '/tmp/suffix-assets/smoke/manifest.json')
+    + '\nfrom IPython.display import display, FileLink\ndisplay(FileLink(str(WORK / "suffix_smoke/suffix_checkpoint.zip")))\n',
+    SETUP_BOOTSTRAP + '\n# Pilot: run after smoke; rerun this cell to resume in the same session.\n'
+    + 'PILOT = WORK / "suffix_pilot"\n'
+    + 'assert (WORK / "suffix_smoke/status.json").exists(), "Run the smoke cell first; for a new-session checkpoint restore, use the full 7-cell notebook."\n'
+    + 'assert json.loads((WORK / "suffix_smoke/status.json").read_text())["test2_complete"], "Finish smoke before preparing the pilot."\n'
+    + 'lab("prepare")\n' + CELLS[5]
+    + '\nfrom IPython.display import display, Markdown, FileLink\ndisplay(Markdown((PILOT / "analysis/REPORT.md").read_text()))\ndisplay(FileLink(str(PILOT / "suffix_checkpoint.zip")))\n'
+]
+
+
 def build():
     cells = [textwrap.dedent(source).lstrip() for source in CELLS]
     destination = ROOT / "notebooks"
@@ -164,6 +199,18 @@ def build():
                    "outputs": [], "source": source.splitlines(True)} for i, source in enumerate(cells)]}
     (destination/"math_gsm8k.ipynb").write_text(json.dumps(notebook, indent=2), encoding="utf-8")
     (ROOT/"KAGGLE_CELLS.md").write_text(intro+"\n"+"\n\n".join("```python\n"+source+"```" for source in cells)+"\n", encoding="utf-8")
+    quick_intro = ("# Kaggle two-cell quickstart\n\n"
+                   "Enable Internet and GPU T4 x2. Cell1 includes setup, correctness checks and smoke5+5. "
+                   "Cell2 runs100 MATH-500 +100 GSM8K after smoke; no earlier setup cell is needed. "
+                   "Public repo: no GitHub token. Setup uses the three reviewed cells at an immutable commit. "
+                   "Same-session resume: rerun the relevant cell. For new-session ZIP restore use math_gsm8k.ipynb.\n")
+    quick_notebook = {**notebook, "cells": [
+        {"cell_type": "markdown", "id": "quickstart", "metadata": {}, "source": quick_intro.splitlines(True)}] +
+        [{"cell_type": "code", "id": f"quick-{i+1}", "metadata": {}, "execution_count": None,
+          "outputs": [], "source": source.splitlines(True)} for i, source in enumerate(QUICK_CELLS)]}
+    (destination/"math_gsm8k_two_cells.ipynb").write_text(json.dumps(quick_notebook, indent=2), encoding="utf-8")
+    (ROOT/"KAGGLE_TWO_CELLS.md").write_text(quick_intro+"\n"+"\n\n".join(
+        "```python\n"+source+"```" for source in QUICK_CELLS)+"\n", encoding="utf-8")
     return cells
 
 

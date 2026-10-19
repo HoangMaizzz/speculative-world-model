@@ -16,9 +16,9 @@ Vòng đầu: **100 MATH-500 + 100 GSM8K**, seed 42. Tối đa 5 shared prefixes
 
 1. Notebook Settings: **Internet ON, GPU T4 x2**.
 2. Repo public: không cần GitHub token. Nếu repo vẫn private: add/enable Kaggle Secret **GITHUB_TOKEN** có quyền đọc repo. Không dán token vào cell. HF_TOKEN tùy chọn.
-3. Import [notebooks/math_gsm8k.ipynb](notebooks/math_gsm8k.ipynb), hoặc copy **toàn bộ 7 cells** từ [KAGGLE_CELLS.md](KAGGLE_CELLS.md), chạy theo thứ tự.
-4. Cell 5 chạy CPU audits, pretrained GPU preflight và smoke 5+5. Chỉ chạy cell 6 sau khi smoke hoàn tất.
-5. Cell 6 chạy pilot 100+100 và tự checkpoint; rerun cell này để tiếp tục khi đạt soft budget. Cell 7 hiện report, đủ 10 plots và ZIP.
+3. Dễ nhất: import [notebooks/math_gsm8k_two_cells.ipynb](notebooks/math_gsm8k_two_cells.ipynb) hoặc copy **hai cell tự setup** từ [KAGGLE_TWO_CELLS.md](KAGGLE_TWO_CELLS.md). Chạy cell1 smoke trước, rồi cell2 pilot. Không cần định nghĩa `lab` thủ công. Nếu cần restore ZIP phiên mới, dùng bản đầy đủ [notebooks/math_gsm8k.ipynb](notebooks/math_gsm8k.ipynb) hoặc [KAGGLE_CELLS.md](KAGGLE_CELLS.md).
+4. Trong bản7cell, cell5 chạy CPU audits, pretrained GPU preflight và smoke5+5. Chỉ chạy cell6 sau khi smoke hoàn tất.
+5. Trong bản7cell, cell6 chạy pilot100+100 và tự checkpoint; rerun để tiếp tục khi đạt soft budget. Cell7 hiện report, đủ10plots và ZIP.
 
 Notebook dùng môi trường riêng trong `/tmp`, Torch 2.9.0 CUDA12.6 và dependency pins để tránh package đã import trong Kaggle kernel. Model cache trong `/tmp`, không nằm trong artifact. Commit thực tế, package versions, precision và GPU được ghi vào identity.
 

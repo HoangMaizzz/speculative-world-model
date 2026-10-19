@@ -3,11 +3,45 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import io
+from unittest.mock import patch
 from suffix_lab.assets import ROOT
 from suffix_lab.store import Store
 
 
 class ArtifactTests(unittest.TestCase):
+    def builder(self):
+        spec = importlib.util.spec_from_file_location("build_notebook", ROOT/"scripts/build_notebook.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_quickstart_bootstrap_restores_missing_lab_once(self):
+        module = self.builder()
+        sources = ["setup_order = [1]\n", "setup_order.append(2)\nWORK=REPO=COMMIT='fixture'\n",
+                   "setup_order.append(3)\nPY='python'\ndef lab(*args, **kwargs): return 123\n",
+                   "raise AssertionError('must not execute experiments during setup')\n"]
+        notebook = {"cells": [{"cell_type": "code", "source": [s]} for s in sources]}
+        namespace = {}
+        with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(notebook).encode())) as fetch:
+            exec(compile(module.SETUP_BOOTSTRAP, "bootstrap", "exec"), namespace)
+            self.assertEqual(namespace["lab"]("prepare"), 123)
+            self.assertEqual(namespace["setup_order"], [1, 2, 3])
+            exec(compile(module.SETUP_BOOTSTRAP, "bootstrap", "exec"), namespace)
+            fetch.assert_called_once()
+            self.assertEqual(namespace["setup_order"], [1, 2, 3])
+
+    def test_quick_notebook_matches_copyable_cells_and_compiles(self):
+        module = self.builder()
+        notebook = json.loads((ROOT/"notebooks/math_gsm8k_two_cells.ipynb").read_text())
+        cells = ["".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code"]
+        self.assertEqual(cells, module.QUICK_CELLS)
+        markdown = (ROOT/"KAGGLE_TWO_CELLS.md").read_text()
+        for i, cell in enumerate(cells):
+            compile(cell, f"quick-cell-{i}", "exec")
+            self.assertIn(cell, markdown)
+            self.assertTrue(cell.startswith(module.SETUP_BOOTSTRAP))
+
     def test_notebook_and_copyable_cells_match_and_compile(self):
         spec = importlib.util.spec_from_file_location("build_notebook", ROOT/"scripts/build_notebook.py")
         module = importlib.util.module_from_spec(spec)
