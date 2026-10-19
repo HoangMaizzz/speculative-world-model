@@ -19,7 +19,7 @@ _suffix_url = (
 )
 with urllib.request.urlopen(_suffix_url, timeout=60) as response:
     _suffix_source = response.read()
-if hashlib.sha256(_suffix_source).hexdigest() != "750c3412803db231068e6754d994cb51c023bd64acea88f487e75397a7e8e603":
+if hashlib.sha256(_suffix_source).hexdigest() != "8797900ba4561981d8fe6968f797706a1e963e9caee6ea5ddad293f6f79c1ac8":
     raise RuntimeError("Launcher checksum differs; execution stopped.")
 _suffix_scope = {"__name__": "__main__", "__file__": _suffix_url,
                  "SUFFIX_MODE": "smoke", "SUFFIX_CODE_REVISION": _suffix_revision}
@@ -43,7 +43,7 @@ _suffix_url = (
 )
 with urllib.request.urlopen(_suffix_url, timeout=60) as response:
     _suffix_source = response.read()
-if hashlib.sha256(_suffix_source).hexdigest() != "750c3412803db231068e6754d994cb51c023bd64acea88f487e75397a7e8e603":
+if hashlib.sha256(_suffix_source).hexdigest() != "8797900ba4561981d8fe6968f797706a1e963e9caee6ea5ddad293f6f79c1ac8":
     raise RuntimeError("Launcher checksum differs; execution stopped.")
 _suffix_scope = {"__name__": "__main__", "__file__": _suffix_url,
                  "SUFFIX_MODE": "pilot", "SUFFIX_CODE_REVISION": _suffix_revision}

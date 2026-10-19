@@ -92,6 +92,22 @@ class TinyModelTests(unittest.TestCase):
             self.assertEqual(row["parallel_token"], 9)
             self.assertEqual(row["full_prefix_token"], 4)
 
+    def test_future_tail_cannot_change_earlier_verifier_predictions(self):
+        from suffix_lab.runtime import target_consistency
+        from suffix_lab.core import Draft
+        class TailDependentSession:
+            def draft(self, prefix, length):
+                return Draft([3, 4], [], [])
+            def score(self, prefix, proposal, top_k=8):
+                return {"top1": [3, 4] if proposal == [3, 4] else ([9, 4] if len(proposal) == 2 else [3]),
+                        "logit_margin": [0.5]*len(proposal)}
+        report = target_consistency(TailDependentSession(), [1, 2], 2)
+        self.assertTrue(report["repeatable"])
+        self.assertTrue(report["parallel_shifted_equal"])
+        self.assertFalse(report["causal_tail_equal"])
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["first_mismatches"][0]["tail_changed_token"], 9)
+
     def test_preflight_failure_records_evidence_and_invalidates_stale_pass(self):
         from suffix_lab import runtime
         fake_tokenizer = SimpleNamespace(apply_chat_template=lambda *a, **kw: [1, 2, 3])
@@ -103,6 +119,7 @@ class TinyModelTests(unittest.TestCase):
             with patch("torch.cuda.device_count", return_value=2), \
                  patch.object(runtime, "tokenizers", return_value=(fake_tokenizer, {})), \
                  patch.object(runtime, "load_target", return_value=(SimpleNamespace(device="cpu"), "int8", None)), \
+                 patch.object(runtime, "release"), \
                  patch.object(runtime, "target_consistency", return_value=audit):
                 with redirect_stdout(io.StringIO()), self.assertRaisesRegex(AssertionError, "preflight_failure.json"):
                     runtime.preflight({"paths": {runtime.TARGET: "fixture"}, "content_digest": "fixture"},

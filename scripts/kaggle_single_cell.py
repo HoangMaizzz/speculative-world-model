@@ -72,6 +72,21 @@ def check_gpus():
             raise RuntimeError("Each GPU needs approximately 16 GB VRAM.")
 
 
+def output_root(work, mode, revision):
+    base = Path(work) / ("suffix_smoke" if mode == "smoke" else "suffix_pilot")
+    manifest, status = base/"run-manifest.json", base/"execution_status.json"
+    previous = None
+    if manifest.exists():
+        previous = json.loads(manifest.read_text()).get("environment", {}).get("commit")
+    elif status.exists():
+        # A failed preflight has no run-manifest yet, but must also be preserved.
+        previous = json.loads(status.read_text()).get("code_revision")
+    if previous is not None and previous != revision:
+        base = base.with_name(base.name+"_"+revision[:12])
+        print("Older output preserved. This revision uses:", base, flush=True)
+    return base
+
+
 def launch(mode, revision):
     if mode not in ("smoke", "pilot") or len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
         raise ValueError("Expected smoke/pilot and a full lowercase commit SHA")
@@ -116,11 +131,7 @@ def launch(mode, revision):
     subprocess.run([str(python), "-c", "import torch; assert torch.cuda.device_count() >= 2; print(torch.__version__, torch.version.cuda)"],
                    check=True, env=child_environment())
     # Distinct output roots prevent a new code revision from mixing older results.
-    base = work / ("suffix_smoke" if mode == "smoke" else "suffix_pilot")
-    existing = base / "run-manifest.json"
-    if existing.exists() and json.loads(existing.read_text()).get("environment", {}).get("commit") != revision:
-        base = work / (base.name+"_"+revision[:12])
-        print("Older output preserved. This revision uses:", base, flush=True)
+    base = output_root(work, mode, revision)
     assets = Path("/tmp/suffix-assets") / (mode+"-"+revision[:12])
     result = subprocess.run([str(python), "-u", str(repo/"scripts/kaggle_run.py"),
                              "--mode", mode, "--revision", revision,

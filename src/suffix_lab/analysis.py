@@ -222,6 +222,7 @@ def analyze(output, bootstrap_samples=2000):
     text += "Read benchmark/source/rejection/horizon strata before comparing aggregates. Confidence curves and feature scores are descriptive, without fitted selectors.\n\n"
     text += "Oracle A is not a global upper bound. B is a bounded search triggered when A does not improve fresh-L. "
     text += "A selector gap suggests studying feedback/selection; failure of bounded oracles suggests checking geometry audits, mask patterns and infilling ability, without identifying a unique cause.\n\n"
+    text += "Timing: verifier stats use CUDA compute-stage events excluding Accelerate dispatch copies; wall_latency_ms is preserved separately. Stage time excludes inter-GPU copies and orchestration outside selected stages and is not end-to-end latency. Drafter plots use one-GPU synchronized cold-replay wall time with no peer transfer. Do not interpret wall-minus-stage as measured communication time.\n\n"
     text += "All latency is synchronized independent cold replay, including completed-prefix reconstruction; mutable-only time is also exported. "
     text += "Identical masks share one measured inference; aliases are dependent observations. Selector time is event-level, oracle acquisition/search is excluded from per-arm latency. "
     text += "There is no online rollback/reverification benchmark and no evidence of end-to-end speedup. Drafts are fixed horizon even after draft EOS; target reference stops at EOS and states need a full horizon plus bonus token. "

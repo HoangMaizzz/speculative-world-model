@@ -13,13 +13,23 @@ def release(model):
     import torch
     del model
     gc.collect()
-    torch.cuda.empty_cache()
+    for index in range(torch.cuda.device_count()):
+        with torch.cuda.device(index):
+            torch.cuda.empty_cache()
 
 
 def sync(device):
     import torch
     if str(device).startswith("cuda"):
         torch.cuda.synchronize(device)
+
+
+def sync_model(model):
+    """Account for every GPU in a sharded verifier, including transfer completion."""
+    mapping = getattr(model, "hf_device_map", None)
+    devices = set(mapping.values()) if mapping else {model.device}
+    for device in sorted(devices, key=str):
+        sync(f"cuda:{device}" if isinstance(device, int) else device)
 
 
 def memory():
@@ -31,19 +41,22 @@ def memory():
             for i in range(torch.cuda.device_count())]
 
 
-def load_model(path, device, precision="fp16"):
+def configure_numerics(config):
+    """Use identical process-wide math settings in preflight and experiment."""
     import torch
-    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = config.get(
+        "allow_fp16_reduced_precision_reduction", False)
+
+
+def load_model(path, device, precision="fp16", *, attention="sdpa", device_map=None):
+    import torch
+    from transformers import AutoModelForCausalLM
+    if precision != "fp16":
+        raise ValueError("This experiment requires fixed FP16; quantized fallback is disabled")
     options = dict(trust_remote_code=True, local_files_only=True,
-                   torch_dtype=torch.float16, device_map={"": device}, attn_implementation="sdpa")
-    if precision == "int8":
-        options["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
-    elif precision == "nf4":
-        options["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True,
-            bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True)
-    elif precision != "fp16":
-        raise ValueError(precision)
+                   torch_dtype=torch.float16, device_map=device_map if device_map is not None else {"": device},
+                   attn_implementation=attention)
     model = AutoModelForCausalLM.from_pretrained(path, **options).eval()
     if any(str(v) in ("cpu", "disk") for v in getattr(model, "hf_device_map", {}).values()):
         raise RuntimeError("CPU/disk offload is forbidden in this protocol")
@@ -51,18 +64,22 @@ def load_model(path, device, precision="fp16"):
 
 
 def load_target(path, config, required=None):
-    precision = required or config["target_precision"]
-    try:
-        return load_model(path, "cuda:0", precision), precision, None
-    except Exception as error:
-        if required or precision != "int8" or not config["allow_nf4_fallback"]:
-            raise
-        # Never fall back during an established run or after generating references.
-        reason = {"type": type(error).__name__, "message": str(error)[:500]}
-        gc.collect()
-        import torch
-        torch.cuda.empty_cache()
-        return load_model(path, "cuda:0", "nf4"), "nf4", reason
+    from transformers import AutoConfig
+    if config["target_precision"] != "fp16" or required not in (None, "fp16"):
+        raise ValueError("Use a fresh FP16 run; INT8/NF4 references cannot be resumed as FP16")
+    architecture = AutoConfig.from_pretrained(path, trust_remote_code=True, local_files_only=True)
+    split = config["target_gpu0_layers"]
+    layers = architecture.num_hidden_layers
+    if architecture.model_type != "qwen2" or not 0 < split < layers:
+        raise ValueError("Explicit Qwen2 verifier map requires a split inside its decoder layers")
+    # Contiguous blocks minimize inter-GPU transfers. GPU1 retains room for one
+    # 1.5B FP16 drafter; dLLM and AR are never loaded together.
+    mapping = {"model.embed_tokens": 0, "model.rotary_emb": 0, "model.norm": 1, "lm_head": 1}
+    mapping.update({f"model.layers.{i}": 0 if i < split else 1 for i in range(layers)})
+    model = load_model(path, "cuda:0", "fp16", attention=config.get("target_attention", "sdpa"),
+                       device_map=mapping)
+    model._suffix_exclude_peer_transfers = config.get("exclude_inter_gpu_transfer_time", True)
+    return model, "fp16", None
 
 
 def tokenizers(paths):
@@ -90,10 +107,27 @@ class ARSession:
     def __init__(self, model):
         self.model = model
         self.device = model.device
+        self.timer = None
+        if getattr(model, "_suffix_exclude_peer_transfers", False):
+            from .timing import StageTimer
+            if not hasattr(model, "_suffix_stage_timer"):
+                model._suffix_stage_timer = StageTimer(model)
+            self.timer = model._suffix_stage_timer
 
     def draft(self, prefix, length, stop_eos=None):
+        if self.timer is None:
+            result = self._draft(prefix, length, stop_eos)
+            result.stats["latency_policy"] = "single_device_synchronized_wall_no_peer_transfer"
+            return result
+        with self.timer.measure():
+            result = self._draft(prefix, length, stop_eos)
+        if length:
+            result.stats.update(self.timer.report(result.stats["latency_ms"]))
+        return result
+
+    def _draft(self, prefix, length, stop_eos=None):
         import torch
-        sync(self.device)
+        sync_model(self.model)
         begin = time.perf_counter()
         result, confidence = [], []
         cache = None
@@ -113,15 +147,23 @@ class ARSession:
                 if stop_eos is not None and token in stop_eos:
                     break
                 ids = torch.tensor([[token]], device=self.device)
-        sync(self.device)
+        sync_model(self.model)
         return Draft(result, confidence, list(range(len(result))), stats={
             "total_forwards": len(result), "input_tokens": input_tokens,
             "latency_ms": (time.perf_counter()-begin)*1000})
 
     def score(self, prefix, proposal, top_k=8):
         """Old causal feedback on draft contexts; never a post-correction acceptance."""
+        if self.timer is None:
+            return self._score(prefix, proposal, top_k)
+        with self.timer.measure():
+            result = self._score(prefix, proposal, top_k)
+        result.update(self.timer.report(result["latency_ms"]))
+        return result
+
+    def _score(self, prefix, proposal, top_k=8):
         import torch
-        sync(self.device)
+        sync_model(self.model)
         begin = time.perf_counter()
         with torch.inference_mode():
             ids = torch.tensor([prefix + proposal], device=self.device)
@@ -138,14 +180,14 @@ class ARSession:
             others = remaining.topk(top_k-1, -1).indices
             tok = torch.cat((winner, others), dim=1)
             p = probs.gather(1, tok)
-            draft_p = probs.gather(1, torch.tensor(proposal, device=self.device)[:, None]).squeeze(1)
+            draft_p = probs.gather(1, torch.tensor(proposal, device=logits.device)[:, None]).squeeze(1)
             entropy = -(probs * probs.clamp_min(1e-38).log()).sum(-1)
             answer = {"top1": tok[:, 0].tolist(), "probability": draft_p.tolist(),
                       "top1_probability": p[:, 0].tolist(), "margin": (p[:, 0]-p[:, 1]).tolist(),
                       "logit_margin": (logits.gather(1, winner).squeeze(1)-
                                        logits.gather(1, others[:, :1]).squeeze(1)).tolist(),
                       "entropy": entropy.tolist(), "topk_ids": tok.tolist(), "topk_probs": p.tolist()}
-        sync(self.device)
+        sync_model(self.model)
         answer["latency_ms"] = (time.perf_counter()-begin)*1000
         answer["input_tokens"] = len(prefix) + len(proposal)
         return answer
@@ -254,28 +296,57 @@ class DLLMDrafter:
 
 def target_consistency(session, prefix, length=12):
     """Separate repeatability from shifted parallel verification, retaining evidence."""
+    if length < 1:
+        raise ValueError("Target consistency audit needs at least one token")
     a = session.draft(prefix, length).tokens
     b = session.draft(prefix, length).tokens
     feedback = session.score(prefix, a)
     parallel = feedback["top1"]
+    # The last input proposal token is a strict causal future for every returned
+    # prediction row. Changing it must not change those rows' greedy predictions.
+    alternate = list(a)
+    alternate[-1] = next((t for t in prefix if t != a[-1]), 0 if a[-1] != 0 else 1)
+    tail_changed = session.score(prefix, alternate)["top1"]
     repeatable, shifted_equal = a == b, a == parallel
+    causal_equal = parallel == tail_changed
     mismatches = []
     for i, token in enumerate(a):
-        if token == b[i] == parallel[i]:
+        if token == b[i] == parallel[i] == tail_changed[i]:
             continue
         # Full-prefix single-row replay helps distinguish cached decoding from
         # long teacher-forced scoring. It is diagnostic, never substituted as gold.
         single = session.score(prefix+a[:i], [token], top_k=2)
         mismatches.append({"position": i, "cached_token": token, "repeat_token": b[i],
             "parallel_token": parallel[i], "parallel_logit_margin": feedback["logit_margin"][i],
+            "tail_changed_token": tail_changed[i],
             "full_prefix_token": single["top1"][0],
             "full_prefix_logit_margin": single["logit_margin"][0]})
         if len(mismatches) == 3:
             break
-    return {"passed": repeatable and shifted_equal, "repeatable": repeatable,
+    return {"passed": repeatable and shifted_equal and causal_equal, "repeatable": repeatable,
             "parallel_shifted_equal": shifted_equal, "greedy_tie_break": "lowest_token_id",
+            "causal_tail_equal": causal_equal, "tail_changed_tokens": tail_changed,
             "prefix_length": len(prefix), "cached_tokens": a, "repeat_tokens": b,
             "parallel_tokens": parallel, "first_mismatches": mismatches}
+
+
+class TargetConsistencyError(AssertionError):
+    def __init__(self, attempts):
+        self.attempts = attempts
+        super().__init__("No verifier configuration passed exact target consistency")
+
+
+def checked_target(path, config, prefix, required=None):
+    """Check the fixed FP16 verifier; never switch precision to bypass a failure."""
+    model, precision, fallback = load_target(path, config, required)
+    session = ARSession(model)
+    audit = target_consistency(session, prefix)
+    attempts = [{"precision": precision, "load_fallback": fallback, "target_audit": audit}]
+    if audit["passed"]:
+        return model, precision, fallback, audit, attempts
+    del session, model
+    release(None)
+    raise TargetConsistencyError(attempts)
 
 
 def preflight(manifest, config, output):
@@ -285,7 +356,7 @@ def preflight(manifest, config, output):
     if torch.cuda.device_count() < 2:
         raise RuntimeError("Requires two CUDA GPUs (Kaggle T4 x2)")
     torch.manual_seed(config["seed"])
-    torch.backends.cuda.matmul.allow_tf32 = False
+    configure_numerics(config)
     tokenizer, evidence = tokenizers(manifest["paths"])
     prefix = tokenizer.apply_chat_template([{"role": "user", "content": "Compute 17 + 28. Explain briefly."}],
                                            tokenize=True, add_generation_prompt=True)
@@ -293,13 +364,15 @@ def preflight(manifest, config, output):
     previous = json.loads(established.read_text()) if established.exists() else None
     if previous and (previous["config"] != config or previous["asset_digest"] != manifest["content_digest"]):
         raise ValueError("Existing run differs; preflight requires its original config/assets or a new output")
-    target, precision, fallback = load_target(manifest["paths"][TARGET], config,
-                                             previous["target_precision"] if previous else None)
-    target_session = ARSession(target)
-    audit = target_consistency(target_session, prefix)
-    if not audit["passed"]:
+    try:
+        target, precision, fallback, audit, attempts = checked_target(manifest["paths"][TARGET], config,
+                                                 prefix, previous["target_precision"] if previous else None)
+    except TargetConsistencyError as error:
+        last = error.attempts[-1]
+        precision, fallback, audit = last["precision"], last["load_fallback"], last["target_audit"]
         failure = {"passed": False, "stage": "target_consistency", "precision": precision,
                    "fallback": fallback, "target_audit": audit, "torch": torch.__version__,
+                   "target_attempts": error.attempts,
                    "config": config, "assets_digest": manifest["content_digest"]}
         failure["source_digest"] = source_digest()
         atomic_json(Path(output)/"preflight_failure.json", failure)
@@ -308,8 +381,8 @@ def preflight(manifest, config, output):
         raise AssertionError("Target consistency failed; see preflight_failure.json for repeatability, "
                              "parallel tokens and first mismatch margins. No experiment was run.")
     target_memory = memory()
-    del target_session, target
-    release(None)
+    target_device_map = {name: str(device) for name, device in target.hf_device_map.items()}
+    # Keep the FP16 verifier resident while checking one drafter at a time.
     dllm = load_model(manifest["paths"][DLLM], "cuda:1")
     drafter = DLLMDrafter(dllm, config)
     checks = []
@@ -329,11 +402,23 @@ def preflight(manifest, config, output):
     dllm_memory = memory()
     del drafter, dllm
     release(None)
+    ar = load_model(manifest["paths"][AR], "cuda:1")
+    ar_audit = target_consistency(ARSession(ar), prefix, 8)
+    if not ar_audit["passed"]:
+        raise AssertionError("FP16 AR drafter preflight consistency failed")
+    ar_memory = memory()
+    del ar, target
+    release(None)
     report = {"passed": True, "precision": precision, "fallback": fallback,
               "assets_digest": manifest["content_digest"], "config": config,
               "target_audit": audit,
+              "target_attempts": attempts,
+              "target_device_map": target_device_map,
+              "target_latency_policy": "cuda_stage_events_excluding_dispatch_copies",
+              "ar_audit": ar_audit, "ar_memory": ar_memory,
               "tokenizer": evidence, "checks": checks, "target_memory": target_memory,
               "dllm_memory": dllm_memory, "torch": torch.__version__}
     report["source_digest"] = source_digest()
     atomic_json(Path(output) / "preflight.json", report)
+    (Path(output)/"preflight_failure.json").unlink(missing_ok=True)
     return report

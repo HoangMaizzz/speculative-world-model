@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 import importlib.util
+import weakref
 from unittest.mock import patch
 from suffix_lab.assets import ROOT, AR, DLLM
 from suffix_lab.core import Draft
@@ -51,13 +52,27 @@ class PipelineTests(unittest.TestCase):
             runner.store.put("reference", "gsm8k:0", {"id": "gsm8k:0", "dataset": "gsm8k",
                 "prompt_ids": [1, 2], "tokens": list(range(10, 90)), "offsets": [0, 16]})
             runner.store.put("meta", "references_complete", True)
-            with patch("suffix_lab.runtime.load_model", side_effect=lambda name, device: name), \
+            loaded, weak_models = [], []
+            class ModelFixture:
+                def __init__(self, name):
+                    self.name = name
+                def __eq__(self, other):
+                    return self.name == other
+            def load_one(name, device):
+                self.assertTrue(all(ref() is None for ref in weak_models), "Previous drafter still resident")
+                model = ModelFixture(name)
+                weak_models.append(weakref.ref(model))
+                loaded.append(name)
+                return model
+            with patch("suffix_lab.runtime.load_model", side_effect=load_one), \
                  patch("suffix_lab.runtime.ARSession", FakeDrafter), \
                  patch("suffix_lab.runtime.DLLMDrafter", FakeDrafter), \
                  patch("suffix_lab.runtime.release"), patch("suffix_lab.runtime.memory", return_value=[]):
                 runner.test1()
                 self.assertEqual(len(runner.store.rows("test1")), 4)
                 runner.test2()
+                self.assertEqual(loaded[:3], [DLLM, AR, DLLM])
+                self.assertTrue(all(ref() is None for ref in weak_models))
                 old = runner.store.rows("test2")
                 self.assertEqual(len(runner.store.rows("event_complete")), 2)
                 for row in old:

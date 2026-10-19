@@ -1,6 +1,7 @@
 """Regression cases for missing ensurepip and a half-created virtualenv."""
 import importlib.util
 import os
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -17,6 +18,16 @@ def launcher_module():
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_failed_old_preflight_output_is_preserved_for_new_revision(self):
+        module = launcher_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)/"suffix_smoke"
+            base.mkdir()
+            (base/"execution_status.json").write_text(json.dumps({"code_revision": "a"*40}))
+            (base/"preflight_failure.json").write_text("fixture")
+            self.assertEqual(module.output_root(tmp, "smoke", "b"*40), Path(tmp)/("suffix_smoke_"+"b"*12))
+            self.assertEqual(module.output_root(tmp, "smoke", "a"*40), base)
+            self.assertTrue((base/"preflight_failure.json").exists())
     def test_child_environment_preserves_gpu_settings_without_notebook_hooks(self):
         module = launcher_module()
         source = {"PYTHONPATH": "/notebook/hooks", "PYTHONHOME": "/notebook/python",

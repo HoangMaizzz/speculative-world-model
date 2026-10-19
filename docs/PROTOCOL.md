@@ -1,4 +1,6 @@
-# Protocol v1 — frozen 100+100 pilot
+# Protocol v2 — FP16 placement and compute-stage timing, 100+100 pilot
+
+Verifier is fixed FP16, never INT8/NF4. Explicit Qwen2 device map: embedding/rotary and decoder layers0–17 onGPU0; layers18–27, final norm and lm_head onGPU1. A single FP16 drafter resides onGPU1 alongside the sharded verifier. Test1 runs dLLM first, releases model/provider references, garbage collects and clears both CUDA allocator caches before loading AR. Test2 loads dLLM again only after completing both Test1 sources. Preflight keeps the verifier resident while checking these drafters sequentially. No CPU/disk offload, automatic precision fallback or reuse of old quantized references is allowed.
 
 ## Data and paired states
 
@@ -22,6 +24,8 @@ One target forward on C+D yields old-context feedback, shifted one row. Save top
 
 All greedy token choices use argmax on logits, breaking exact ties by lowest token ID. This includes AR drafting, verifier feedback and dLLM predictions. The first top-k entry is explicitly this greedy winner, followed by distinct remaining candidates; top-k tie ordering among the other entries does not define acceptance. Preflight separately records repeated cached decoding and parallel shifted scoring. On failure, preflight_failure.json records the token sequences and up to three first mismatches, their parallel logit margins and full-prefix single-row replay predictions. It invalidates a stale preflight pass and remains a hard stop; no approximate acceptance or precision change is applied to conceal a mismatch.
 
+Preflight also changes the last input proposal token and requires all returned causal greedy predictions to remain equal: that token is a strict future for every returned row. This catches token-row coupling outside causal attention, such as data-dependent activation quantization. Passing a finite preflight is not a universal floating-point equality guarantee; Test1 retains its per-proposal reference check.
+
 Unmask order/confidence analysis uses suffix positions, with original whole-proposal order preserved. AR confidence and order refer to causal generation. Old verifier features are evaluated against true-reference suffix labels descriptively, including prevalence, AUROC/AUPRC/Brier; they are not calibrated post-correction probabilities. Conditional suffix comparisons can have different horizons/rejection distributions. Inspect paired common-state count metrics and benchmark/rejection/phase strata alongside conditional rates.
 
 ## Test 2
@@ -41,6 +45,8 @@ Non-oracle plan construction takes an immutable Observation with old tokens, dra
 Accepted prefix, token accuracy, KEEP precision, remasked accuracy, fully-correct rate, false anchors, recovered old KEEP tokens inside the new accepted prefix, forward counts and synchronized latency are exported per arm. Paired gains use the same event's fresh-L. A source's sampled events are not necessarily identical to the other source's; stratify instead of interpreting source differences causally.
 
 ## Costs, uncertainty and interpretation
+
+Per user instruction, verifier timing excludes communication between GPUs. The primary verifier latency_ms sums CUDA-event elapsed durations of non-nested embedding, rotary, decoder, norm and head stages. Events wrap each stage's Accelerate _old_forward, after input dispatch and before output dispatch; inter-GPU copies remain outside measured intervals. Events are on the stage's own device/stream and all model devices synchronize before reading them. This is compute-stage time, not end-to-end latency or pure kernel time; it can include launch gaps inside a stage, and excludes orchestration/IO outside selected stages. wall_latency_ms is preserved separately. Their difference is not reported as transfer latency. Missing stage events fail rather than silently substituting wall time. Drafters run on one GPU without peer transfers and retain their synchronized wall/cold-replay measures; do not directly compare these different timing policies as hardware throughput. Operational6h wall budget includes all time, including copies and instrumentation.
 
 Forward count distinguishes unmask, completed-prefix prefill and completed-block cache-update forwards, plus queried token counts. Cold prefix reconstruction, unmask time and cache-update time are separate counters; total draft time includes synchronization/Python scheduling. Mutable latency subtracts only cold prefill. Target feedback and reference costs are recorded separately. Event-level selector time covers plan construction, not model inference. These measurements are not a real online cache rollback/reverification pipeline; no speedup claim is supported.
 

@@ -6,11 +6,15 @@ Vòng đầu: **100 MATH-500 + 100 GSM8K**, seed 42. Tối đa 5 shared prefixes
 
 | Vai trò | Checkpoint | Thiết bị / precision |
 |---|---|---|
-| Verifier/reference | Qwen/Qwen2.5-7B-Instruct | GPU0 INT8; có thể NF4 trước khi bắt đầu run |
+| Verifier/reference | Qwen/Qwen2.5-7B-Instruct | FP16 cố định, chia lớp trên GPU0 + GPU1 |
 | AR drafter | Qwen/Qwen2.5-1.5B-Instruct | GPU1 FP16 |
 | Diffusion drafter/infiller | Efficient-Large-Model/Fast_dLLM_v2_1.5B | GPU1 FP16, load lần lượt với AR |
 
 `source-lock.json` khóa model/dataset revisions, official Git revision và hash code remote. `prepare` xác minh hash trước inference. Không dùng CPU/disk offload.
+
+Theo yêu cầu mới20/10: không dùng INT8/NF4 và không fallback lượng tử. GPU0 giữ embedding, rotary và18decoder layers đầu; GPU1 giữ10layers cuối, norm, lm_head và một drafter1.5B FP16. Test1 chạy dLLM trước, unload/GC/empty allocator caches trên cả hai GPU, rồi mới load AR. Test2 nạp lại dLLM sau khi đã freeze sample từ cả hai nguồn. Preflight kiểm hai drafter lần lượt khi verifier vẫn resident. Precision/device map/timing policy được lưu trong identity; không resume kết quả INT8 thành FP16.
+
+Thời gian verifier chính là tổng CUDA-event durations trong các compute stages (embedding/rotary/decoder/norm/head), đặt bên trong Accelerate dispatch hooks để loại copy giữaGPU. Đây là stage compute time, không phải latency đầu cuối; không gồm Python/IO giữa các stages. `wall_latency_ms` được lưu riêng, không lấy chênh lệch wall-minus-compute làm thời gian truyền dữ liệu. Drafter chỉ ởGPU1, không có inter-GPU copy trong forward; tiếp tục báo synchronized wall/cold replay. Session budget6h luôn là wall time thực tế.
 
 ## Chạy trên Kaggle
 
@@ -28,6 +32,8 @@ Runtime723200ac sửa dependency thành `pyarrow==21.0.0`, đáp ứng yêu cầ
 Runtime18d665bd giữ sửa dependency trên và sửa môi trường biểu đồ: dùng `MPLBACKEND=Agg` trước khi import Matplotlib, loại `PYTHONPATH`/`PYTHONHOME` kế thừa khỏi các tiến trình Python con. Điều này tránh backend inline/startup hooks chỉ có trong notebook bị kéo vào venv. Các test giả lập không còn in COMPLETE gây nhầm với smoke thật; chỉ tin trạng thái cuối của lần chạy. Không đổi protocol, và vẫn bắt buộc pretrained GPU preflight trên Kaggle.
 
 Runtime90d6442a thống nhất greedy argmax trên logits, tie chọn token ID nhỏ nhất, cho drafting/verifier/dLLM. Không dùng phần tử đầu của topk làm greedy winner vì topk không bảo đảm tie order. Preflight ghi tách repeatability và parallel shifted equality; nếu fail, `preflight_failure.json` và ZIP chứa token IDs/vị trí/margins cùng full-prefix replay. Log Kaggle cũ chỉ có assertion gộp nên chưa xác định nguyên nhân chính xác; bản sửa tie đã được test local nhưng chưa có pretrained GPU pass. Cảnh báo sitecustomize/wrapt còn xuất hiện, chưa chứng minh có liên quan mismatch. Không bỏ correctness checks hay tự đổi INT8 để che mismatch.
+
+Log sau đó xác định lỗi INT8 vẫn còn: cached token17767 khác full/parallel220 tại vị trí2, repeatable=true và margin0.625/0.0625, nên trường hợp này không phải tie. Bản hiện hành chuyển FP16 theo yêu cầu người dùng; preflight còn kiểm thay token cuối không được đổi dự đoán causal phía trước. Requirements bỏ bitsandbytes, thêm wrapt1.17.3 cho module thiếu được sitecustomize báo. Đây không phải tuyên bố wrapt là nguyên nhân lệch token hay đã chạy pretrained FP16 thành công.
 
 Notebook dùng môi trường riêng trong `/tmp`, Torch 2.9.0 CUDA12.6 và dependency pins để tránh package đã import trong Kaggle kernel. Model cache trong `/tmp`, không nằm trong artifact. Commit thực tế, package versions, precision và GPU được ghi vào identity.
 

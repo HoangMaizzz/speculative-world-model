@@ -134,7 +134,7 @@ def environment():
 
 class Runner:
     def __init__(self, config, manifest, output, stage="all"):
-        from .runtime import tokenizers, load_target, ARSession
+        from .runtime import tokenizers, load_target, ARSession, configure_numerics
         self.config, self.manifest = config, manifest
         self.output, self.stage = Path(output), stage
         self.output.mkdir(parents=True, exist_ok=True)
@@ -145,12 +145,17 @@ class Runner:
         self.tokenizer, token_evidence = tokenizers(manifest["paths"])
         import torch
         torch.manual_seed(config["seed"])
-        torch.backends.cuda.matmul.allow_tf32 = False
+        configure_numerics(config)
         self.target, precision, _ = load_target(manifest["paths"][TARGET], config, preflight["precision"])
         self.verifier = ARSession(self.target)
         self.verifier.draft(self.tokenizer.encode("Warmup: 1 + 1 ="), 2)
         self.env = environment()
-        identity = {"protocol": "suffix-top1-v1", "config": config,
+        self.env.update(target_attention=config.get("target_attention", "sdpa"),
+                        drafter_attention="sdpa",
+                        target_device_map={name: str(device) for name, device in self.target.hf_device_map.items()},
+                        target_latency_policy="cuda_stage_events_excluding_dispatch_copies",
+                        allow_fp16_reduced_precision_reduction=torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction)
+        identity = {"protocol": "suffix-top1-v2-fp16-stage-timing", "config": config,
                     "source_digest": source_digest(),
                     "asset_digest": manifest["content_digest"], "target_precision": precision,
                     "tokenizer": token_evidence, "environment": self.env}
@@ -191,7 +196,7 @@ class Runner:
         c = self.config
         if not self.store.get("meta", "references_complete"):
             raise ValueError("Finish references before Test 1")
-        for source, name in (("ar_greedy", AR), ("dllm_top1", DLLM)):
+        for source, name in (("dllm_top1", DLLM), ("ar_greedy", AR)):
             if self.store.get("meta", source+"_complete"):
                 continue
             model = load_model(self.manifest["paths"][name], "cuda:1")

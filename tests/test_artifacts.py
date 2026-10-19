@@ -93,6 +93,9 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(config["datasets"], ["math500", "gsm8k"])
         self.assertEqual(config["prompts_per_dataset"], 100)
         self.assertEqual(config["seed"], 42)
+        self.assertEqual(config["target_precision"], "fp16")
+        self.assertEqual(config["target_gpu0_layers"], 18)
+        self.assertFalse(config["allow_nf4_fallback"])
 
     @unittest.skipUnless(importlib.util.find_spec("matplotlib"), "Optional analysis dependencies absent")
     def test_analysis_first_import_ignores_unavailable_notebook_backend(self):

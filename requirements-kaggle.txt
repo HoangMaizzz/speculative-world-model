@@ -1,6 +1,5 @@
 transformers==4.53.3
 accelerate==1.10.1
-bitsandbytes==0.47.0
 datasets==4.2.0
 huggingface-hub==0.35.3
 einops==0.8.1
@@ -10,4 +9,5 @@ pyarrow==21.0.0
 matplotlib==3.10.1
 scikit-learn==1.6.1
 safetensors==0.6.2
+wrapt==1.17.3
 
