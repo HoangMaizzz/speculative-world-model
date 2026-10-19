@@ -168,8 +168,8 @@ if not (callable(globals().get("lab")) and
 assert callable(globals().get("lab")), "Setup did not define lab; inspect the preceding error."
 '''
 
-SINGLE_CELL_REVISION = "723200ace9c58041a84925a1d04852c82fda0020"
-SINGLE_CELL_LAUNCHER_REVISION = "8fab80c128f4eedf7c8996b6b803afdb412fe3fc"
+SINGLE_CELL_REVISION = "18d665bdf6588fda5df7cf0db2e0222af3550c39"
+SINGLE_CELL_LAUNCHER_REVISION = "18d665bdf6588fda5df7cf0db2e0222af3550c39"
 SINGLE_CELL_SHA256 = "750c3412803db231068e6754d994cb51c023bd64acea88f487e75397a7e8e603"
 
 
