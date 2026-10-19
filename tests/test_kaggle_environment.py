@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 from suffix_lab.assets import ROOT
 
 
@@ -16,6 +17,37 @@ def launcher_module():
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_child_environment_preserves_gpu_settings_without_notebook_hooks(self):
+        module = launcher_module()
+        source = {"PYTHONPATH": "/notebook/hooks", "PYTHONHOME": "/notebook/python",
+                  "MPLBACKEND": "module://matplotlib_inline.backend_inline",
+                  "CUDA_VISIBLE_DEVICES": "0,1", "HF_HOME": "/cache", "PATH": "fixture"}
+        env = module.child_environment(source)
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertNotIn("PYTHONHOME", env)
+        self.assertEqual(env["MPLBACKEND"], "Agg")
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1")
+        self.assertEqual(env["HF_HOME"], "/cache")
+        self.assertEqual(env["PATH"], "fixture")
+        self.assertEqual(source["PYTHONPATH"], "/notebook/hooks")
+
+    def test_setup_child_does_not_load_injected_sitecustomize(self):
+        import sys
+        module = launcher_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root/"sitecustomize.py").write_text("raise RuntimeError('fixture leaked startup hook')")
+            log = root/"setup.log"
+            with patch.dict(os.environ, {"PYTHONPATH": tmp, "PYTHONHOME": str(root/"invalid-home"),
+                    "MPLBACKEND": "module://matplotlib_inline.backend_inline"}):
+                module.setup_command([sys.executable, "-c",
+                    "import os; assert 'PYTHONPATH' not in os.environ; "
+                    "assert 'PYTHONHOME' not in os.environ; "
+                    "assert os.environ['MPLBACKEND']=='Agg'; print('clean child startup')"], log)
+            output = log.read_text()
+            self.assertIn("clean child startup", output)
+            self.assertNotIn("fixture leaked startup hook", output)
+
     def test_new_environment_does_not_invoke_ensurepip(self):
         module = launcher_module()
         with tempfile.TemporaryDirectory() as tmp:

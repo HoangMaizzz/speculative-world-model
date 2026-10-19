@@ -5,6 +5,9 @@ import tempfile
 import unittest
 import io
 import hashlib
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 from suffix_lab.assets import ROOT
@@ -90,6 +93,20 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(config["datasets"], ["math500", "gsm8k"])
         self.assertEqual(config["prompts_per_dataset"], 100)
         self.assertEqual(config["seed"], 42)
+
+    @unittest.skipUnless(importlib.util.find_spec("matplotlib"), "Optional analysis dependencies absent")
+    def test_analysis_first_import_ignores_unavailable_notebook_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, MPLBACKEND="module://suffix_missing_inline_fixture")
+            code = (
+                "import sys; from pathlib import Path; from suffix_lab.analysis import analyze; "
+                "report=analyze(sys.argv[1],20); "
+                "assert report['test1_proposals']==0; "
+                "assert len(list((Path(sys.argv[1])/'analysis').glob('*.png')))==10"
+            )
+            result = subprocess.run([sys.executable, "-c", code, tmp], cwd=ROOT, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
 
     @unittest.skipUnless(importlib.util.find_spec("matplotlib"), "Optional analysis dependencies absent")
     def test_empty_partial_analysis_writes_all_ten_plots(self):

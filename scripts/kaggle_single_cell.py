@@ -9,6 +9,16 @@ URL = "https://github.com/HoangMaizzz/speculative-world-model.git"
 BRANCH = "codex/suffix-top1-math-gsm8k"
 
 
+def child_environment(source=None):
+    """Keep credentials/CUDA settings, excluding notebook Python startup hooks."""
+    env = dict(os.environ if source is None else source)
+    for name in ("PYTHONPATH", "PYTHONHOME"):
+        env.pop(name, None)
+    # The venv exports PNGs; the notebook renders the resulting files separately.
+    env["MPLBACKEND"] = "Agg"
+    return env
+
+
 def setup_command(args, log_path):
     """Print and preserve setup output, including the real venv/pip failure."""
     log_path = Path(log_path)
@@ -17,7 +27,8 @@ def setup_command(args, log_path):
     with log_path.open("a", encoding="utf-8") as log:
         log.write("\n$ "+" ".join(map(str, args))+"\n")
         with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, encoding="utf-8", errors="replace", bufsize=1) as process:
+                              text=True, encoding="utf-8", errors="replace", bufsize=1,
+                              env=child_environment()) as process:
             for line in process.stdout:
                 print(line, end="", flush=True)
                 log.write(line)
@@ -35,10 +46,12 @@ def ensure_environment(venv, log_path, run_setup=setup_command, probe=subprocess
         # Python 3.13 in some Kaggle images has venv but omits ensurepip.
         run_setup([base_python, "-m", "venv", "--without-pip", str(venv)], log_path)
     if probe([str(python), "-c", "import sys; print(sys.version)"],
-             capture_output=True, text=True).returncode:
+             capture_output=True, text=True, env=child_environment()).returncode:
         raise RuntimeError(f"Virtual environment interpreter is not usable: {python}; no files were deleted.")
-    if probe([str(python), "-m", "pip", "--version"], capture_output=True, text=True).returncode:
-        host = probe([base_python, "-m", "pip", "--version"], capture_output=True, text=True)
+    if probe([str(python), "-m", "pip", "--version"], capture_output=True, text=True,
+             env=child_environment()).returncode:
+        host = probe([base_python, "-m", "pip", "--version"], capture_output=True, text=True,
+                     env=child_environment())
         if host.returncode:
             raise RuntimeError("Notebook Python has no pip. Capture this output and the Kaggle image/Python version; no system packages were changed.")
         # pip --python explicitly supports environments where pip is absent.
@@ -100,7 +113,8 @@ def launch(mode, revision):
                        "-r", str(repo/"requirements-kaggle.txt")], setup_log)
         setup_command([str(python), "-m", "pip", "install", "--no-deps", "-e", str(repo)], setup_log)
         stamp.write_text(revision)
-    subprocess.run([str(python), "-c", "import torch; assert torch.cuda.device_count() >= 2; print(torch.__version__, torch.version.cuda)"], check=True)
+    subprocess.run([str(python), "-c", "import torch; assert torch.cuda.device_count() >= 2; print(torch.__version__, torch.version.cuda)"],
+                   check=True, env=child_environment())
     # Distinct output roots prevent a new code revision from mixing older results.
     base = work / ("suffix_smoke" if mode == "smoke" else "suffix_pilot")
     existing = base / "run-manifest.json"
@@ -110,7 +124,8 @@ def launch(mode, revision):
     assets = Path("/tmp/suffix-assets") / (mode+"-"+revision[:12])
     result = subprocess.run([str(python), "-u", str(repo/"scripts/kaggle_run.py"),
                              "--mode", mode, "--revision", revision,
-                             "--assets", str(assets), "--output", str(base)], cwd=repo)
+                             "--assets", str(assets), "--output", str(base)], cwd=repo,
+                            env=child_environment())
     try:
         from IPython.display import display, FileLink, Markdown, Image
         report = base / "analysis/REPORT.md"

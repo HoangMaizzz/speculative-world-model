@@ -1,6 +1,7 @@
 """Prompt-cluster uncertainty, paired comparisons and ten diagnostic figures."""
 from collections import defaultdict
 import json
+import os
 from pathlib import Path
 import statistics
 from .store import Store, atomic_json
@@ -30,6 +31,9 @@ def clustered_summary(values, prompts, samples=2000, seed=42):
 
 
 def analyze(output, bootstrap_samples=2000):
+    # Matplotlib reads MPLBACKEND during its first import, before use() can run.
+    # Kaggle's inline backend belongs to the notebook, not this PNG exporter.
+    os.environ["MPLBACKEND"] = "Agg"
     import numpy as np
     import pandas as pd
     import matplotlib
