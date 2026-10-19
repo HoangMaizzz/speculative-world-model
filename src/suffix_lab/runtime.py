@@ -104,7 +104,9 @@ class ARSession:
                 input_tokens += ids.shape[1]
                 out = self.model(ids, past_key_values=cache, use_cache=True, logits_to_keep=1)
                 cache = out.past_key_values
-                prob, token = out.logits[0, -1].float().softmax(-1).max(-1)
+                logits = out.logits[0, -1].float()
+                token = logits.argmax(-1)  # Lowest token ID wins exact ties.
+                prob = logits.softmax(-1)[token]
                 token = int(token)
                 result.append(token)
                 confidence.append(float(prob))
@@ -127,11 +129,21 @@ class ARSession:
             if logits.shape[0] != len(proposal):
                 raise AssertionError("Shifted verifier row count differs")
             probs = logits.softmax(-1)
-            p, tok = probs.topk(top_k, -1)
+            if not 2 <= top_k <= logits.shape[-1]:
+                raise ValueError("top_k must be between two and the vocabulary size")
+            # topk is not stable for tied logits. Its first ID must never define
+            # greedy acceptance: use exactly the argmax rule used in draft().
+            winner = logits.argmax(-1, keepdim=True)
+            remaining = logits.clone().scatter_(1, winner, -torch.inf)
+            others = remaining.topk(top_k-1, -1).indices
+            tok = torch.cat((winner, others), dim=1)
+            p = probs.gather(1, tok)
             draft_p = probs.gather(1, torch.tensor(proposal, device=self.device)[:, None]).squeeze(1)
             entropy = -(probs * probs.clamp_min(1e-38).log()).sum(-1)
             answer = {"top1": tok[:, 0].tolist(), "probability": draft_p.tolist(),
                       "top1_probability": p[:, 0].tolist(), "margin": (p[:, 0]-p[:, 1]).tolist(),
+                      "logit_margin": (logits.gather(1, winner).squeeze(1)-
+                                       logits.gather(1, others[:, :1]).squeeze(1)).tolist(),
                       "entropy": entropy.tolist(), "topk_ids": tok.tolist(), "topk_probs": p.tolist()}
         sync(self.device)
         answer["latency_ms"] = (time.perf_counter()-begin)*1000
@@ -211,7 +223,8 @@ class TorchBlockProvider:
         with torch.inference_mode():
             logits = torch.stack(selected).float()
             logits[:, self.mask_id] = -torch.inf  # MASK is not an output token.
-            probability, token = logits.softmax(-1).max(-1)
+            token = logits.argmax(-1)
+            probability = logits.softmax(-1).gather(1, token[:, None]).squeeze(1)
             return {p: (int(t), float(c)) for p, t, c in zip(positions, token, probability)}
 
     def stats(self):
@@ -239,6 +252,32 @@ class DLLMDrafter:
         return result
 
 
+def target_consistency(session, prefix, length=12):
+    """Separate repeatability from shifted parallel verification, retaining evidence."""
+    a = session.draft(prefix, length).tokens
+    b = session.draft(prefix, length).tokens
+    feedback = session.score(prefix, a)
+    parallel = feedback["top1"]
+    repeatable, shifted_equal = a == b, a == parallel
+    mismatches = []
+    for i, token in enumerate(a):
+        if token == b[i] == parallel[i]:
+            continue
+        # Full-prefix single-row replay helps distinguish cached decoding from
+        # long teacher-forced scoring. It is diagnostic, never substituted as gold.
+        single = session.score(prefix+a[:i], [token], top_k=2)
+        mismatches.append({"position": i, "cached_token": token, "repeat_token": b[i],
+            "parallel_token": parallel[i], "parallel_logit_margin": feedback["logit_margin"][i],
+            "full_prefix_token": single["top1"][0],
+            "full_prefix_logit_margin": single["logit_margin"][0]})
+        if len(mismatches) == 3:
+            break
+    return {"passed": repeatable and shifted_equal, "repeatable": repeatable,
+            "parallel_shifted_equal": shifted_equal, "greedy_tie_break": "lowest_token_id",
+            "prefix_length": len(prefix), "cached_tokens": a, "repeat_tokens": b,
+            "parallel_tokens": parallel, "first_mismatches": mismatches}
+
+
 def preflight(manifest, config, output):
     """Real pretrained GPU checks; success is required before the experiment."""
     import torch
@@ -257,10 +296,17 @@ def preflight(manifest, config, output):
     target, precision, fallback = load_target(manifest["paths"][TARGET], config,
                                              previous["target_precision"] if previous else None)
     target_session = ARSession(target)
-    a = target_session.draft(prefix, 12).tokens
-    b = target_session.draft(prefix, 12).tokens
-    if a != b or target_session.score(prefix, a)["top1"] != a:
-        raise AssertionError("Target repeatability/parallel shifted verification failed")
+    audit = target_consistency(target_session, prefix)
+    if not audit["passed"]:
+        failure = {"passed": False, "stage": "target_consistency", "precision": precision,
+                   "fallback": fallback, "target_audit": audit, "torch": torch.__version__,
+                   "config": config, "assets_digest": manifest["content_digest"]}
+        failure["source_digest"] = source_digest()
+        atomic_json(Path(output)/"preflight_failure.json", failure)
+        atomic_json(Path(output)/"preflight.json", failure)
+        print(json.dumps(failure, indent=2), flush=True)
+        raise AssertionError("Target consistency failed; see preflight_failure.json for repeatability, "
+                             "parallel tokens and first mismatch margins. No experiment was run.")
     target_memory = memory()
     del target_session, target
     release(None)
@@ -285,6 +331,7 @@ def preflight(manifest, config, output):
     release(None)
     report = {"passed": True, "precision": precision, "fallback": fallback,
               "assets_digest": manifest["content_digest"], "config": config,
+              "target_audit": audit,
               "tokenizer": evidence, "checks": checks, "target_memory": target_memory,
               "dllm_memory": dllm_memory, "torch": torch.__version__}
     report["source_digest"] = source_digest()

@@ -9,6 +9,12 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+import json
+import tempfile
+from contextlib import redirect_stdout
+import io
 
 AVAILABLE = importlib.util.find_spec("torch") is not None and importlib.util.find_spec("transformers") is not None
 
@@ -41,6 +47,70 @@ class TinyModelTests(unittest.TestCase):
                 ids = torch.tensor([prefix+a.tokens[:i]])
                 expected.append(int(model(ids, use_cache=False).logits[0, -1].argmax()))
         self.assertEqual(expected, a.tokens)
+
+    def test_tied_logits_use_same_greedy_token_in_draft_and_score(self):
+        import torch
+        from suffix_lab.runtime import ARSession, target_consistency
+        class TiedModel:
+            device = torch.device("cpu")
+            def __call__(self, ids, **kwargs):
+                n = min(ids.shape[1], kwargs.get("logits_to_keep", ids.shape[1]))
+                return SimpleNamespace(logits=torch.zeros(1, n, 1000), past_key_values=None)
+        session = ARSession(TiedModel())
+        draft = session.draft([10, 11, 12], 4)
+        self.assertEqual(draft.tokens, [0]*4)
+        for k in (2, 8, 16):
+            feedback = session.score([10, 11, 12], draft.tokens, k)
+            self.assertEqual(feedback["top1"], [0]*4)
+            self.assertEqual(feedback["logit_margin"], [0.0]*4)
+            for ids in feedback["topk_ids"]:
+                self.assertEqual(ids[0], 0)
+                self.assertEqual(len(set(ids)), k)
+        self.assertTrue(target_consistency(session, [10, 11], 4)["passed"])
+
+    def test_target_consistency_distinguishes_repeatability_and_parallel_errors(self):
+        from suffix_lab.runtime import target_consistency
+        from suffix_lab.core import Draft
+        class FaultySession:
+            def __init__(self, repeatable):
+                self.calls, self.repeatable = 0, repeatable
+            def draft(self, prefix, length):
+                self.calls += 1
+                tokens = [3, 4] if self.repeatable or self.calls == 1 else [3, 8]
+                return Draft(tokens, [], [])
+            def score(self, prefix, proposal, top_k=8):
+                return {"top1": [3, 9] if len(proposal) == 2 else [4],
+                        "logit_margin": [1.0, 0.125] if len(proposal) == 2 else [0.25]}
+        for repeatable in (True, False):
+            report = target_consistency(FaultySession(repeatable), [1, 2], 2)
+            self.assertFalse(report["passed"])
+            self.assertEqual(report["repeatable"], repeatable)
+            self.assertFalse(report["parallel_shifted_equal"])
+            row = report["first_mismatches"][0]
+            self.assertEqual(row["position"], 1)
+            self.assertEqual(row["cached_token"], 4)
+            self.assertEqual(row["parallel_token"], 9)
+            self.assertEqual(row["full_prefix_token"], 4)
+
+    def test_preflight_failure_records_evidence_and_invalidates_stale_pass(self):
+        from suffix_lab import runtime
+        fake_tokenizer = SimpleNamespace(apply_chat_template=lambda *a, **kw: [1, 2, 3])
+        audit = {"passed": False, "repeatable": True, "parallel_shifted_equal": False,
+                 "first_mismatches": [{"position": 1, "cached_token": 4, "parallel_token": 9}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            (output/"preflight.json").write_text('{"passed": true}')
+            with patch("torch.cuda.device_count", return_value=2), \
+                 patch.object(runtime, "tokenizers", return_value=(fake_tokenizer, {})), \
+                 patch.object(runtime, "load_target", return_value=(SimpleNamespace(device="cpu"), "int8", None)), \
+                 patch.object(runtime, "target_consistency", return_value=audit):
+                with redirect_stdout(io.StringIO()), self.assertRaisesRegex(AssertionError, "preflight_failure.json"):
+                    runtime.preflight({"paths": {runtime.TARGET: "fixture"}, "content_digest": "fixture"},
+                                      {"seed": 42}, output)
+            report = json.loads((output/"preflight_failure.json").read_text())
+            self.assertEqual(report["target_audit"], audit)
+            self.assertEqual(report["stage"], "target_consistency")
+            self.assertFalse(json.loads((output/"preflight.json").read_text())["passed"])
 
     def test_official_diffusion_cache_full_and_anchors(self):
         import torch
