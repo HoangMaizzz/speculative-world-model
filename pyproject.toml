@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "suffix-lab"
+version = "0.1.0"
+description = "Paired suffix reuse and strict Top-1 diffusion redrafting diagnostics"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+suffix-lab = "suffix_lab.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

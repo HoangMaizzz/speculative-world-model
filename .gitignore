@@ -1,0 +1,17 @@
+__pycache__/
+.test-tmp/
+*.py[cod]
+.venv/
+.testdeps/
+.test-deps/
+outputs/
+assets/
+hf_cache/
+upstream-review/
+*.sqlite*
+*.zip
+*.safetensors
+*.bin
+.env
+.ipynb_checkpoints/
+

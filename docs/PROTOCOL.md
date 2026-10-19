@@ -1,0 +1,49 @@
+# Protocol v1 — frozen 100+100 pilot
+
+## Data and paired states
+
+Sample 100 test indices without replacement separately from pinned MATH-500 and GSM8K, Python Random(42). Save indices, dataset fingerprints and raw questions. One shared target chat template creates exact prompt IDs used by both drafters; compare all shared token-string IDs plus multilingual/arithmetic encoding probes. Dataset answers are not used by selectors or to score answer quality.
+
+Generate target greedy continuation up to256 tokens, including EOS if reached. No labels after EOS. Eligible offsets require32 proposal tokens **and one bonus reference token**; choose up to5 offsets from beginning through middle, including offset0 and the first available absolute32-aligned state. Other offsets expose physical phases and are reported separately. Short references remain in coverage statistics and can produce fewer/zero states. No prompt replacement to hide short outputs. Two drafters share the exact states; labels compare IDs at fixed positions, not text/edit alignment.
+
+## Strict confidence unmasking
+
+The pinned Fast-dLLM code supplies block-causal SDPA: a token can attend to its physical32 block and completed previous blocks. Inside each absolute8 subblock, choose exactly one remaining MASK with the largest top1 probability each step. Lowest position breaks ties; no threshold or multi-token commit. Continue to fill the requested horizon. Only MASK logit is suppressed; no temperature/top-p sampling. Hard anchors are never mutable.
+
+Raw row j predicts physical position j+1. At a physical boundary use the preceding completed block's last row. **Schedule adaptation:** upstream generate forces this boundary seed into output; this implementation lets its carried-logit candidate compete in the earliest active subblock. It still performs one mutable-block forward per unmask step. This is the requested strict schedule, not a claim to reproduce upstream thresholded generation unchanged. Partial last blocks have MASK padding outside the requested horizon, never emitted; fresh-L and selective arms use identical padding and absolute phases. All requested proposals remain fixed length even after a drafter EOS; draft EOS position is recorded. Target reference stopping is independent and honored.
+
+Prefill only completed physical blocks into KV. Every mutable block is recomputed from its full32 canvas; mutable block caching disabled. After completion, append that block to prefix KV when another block is needed. Never use a draft suffix's stale KV after target correction. Each repair arm constructs an independent provider and cache. For an all-KEEP candidate, no model inference is required. GPU preflight compares cached vs full-prefix inference at phases0/1/7/8/31 and repeated KEEP branches; failures stop execution.
+
+## Test 1
+
+Let D[0:B] be a proposal, Y the target reference, B=32. Accepted prefix k is the first positional mismatch index, or B. First rejection r=k+1 is **1-based**, B+1 sentinel if fully accepted. Correction is Y[r-1]. Rejected suffix is D[r:], length B-r. No-tail rates are null rather than zero. Suffix match rate is matches/available suffix tokens within an event; macro event means and count metrics are reported. Islands are maximal contiguous true matches in D[r:] vs Y[r:]. Direct rejoin is the leading matching run in that suffix after correction.
+
+One target forward on C+D yields old-context feedback, shifted one row. Save top-k, draft-token probability, top1 probability, margin, entropy, not full vocabulary logits. Old-context matches beyond first rejection are heuristics. Before first rejection, old and true prefixes coincide: require same longest accepted prefix and correction token. A disagreement (e.g. numerical differences in quantized incremental vs parallel execution) is a hard failure, logged for inspection; never silently reinterpret the reference.
+
+Unmask order/confidence analysis uses suffix positions, with original whole-proposal order preserved. AR confidence and order refer to causal generation. Old verifier features are evaluated against true-reference suffix labels descriptively, including prevalence, AUROC/AUPRC/Brier; they are not calibrated post-correction probabilities. Conditional suffix comparisons can have different horizons/rejection distributions. Inspect paired common-state count metrics and benchmark/rejection/phase strata alongside conditional rates.
+
+## Test 2
+
+Freeze up to200 eligible events before evaluating arms, seed42, round robin across benchmark and rejection bins1–8/9–16/17–24/25–31, with two dLLM turns per AR turn. If a source is exhausted fill from available events. Keep the frozen sample across resume.
+
+Corrected C'=C+D[:r-1]+Y[r-1] equals C+Y[:r]. Main horizon L=B-r, old suffix D[r:], truth Y[r:]. **All arms use the same strict diffusion infiller** and corrected absolute positions, including AR-origin suffixes. No AR constrained infilling or fresh32 mixed into the main table.
+
+- Fresh-L remasks all L positions.
+- Direct rejoin keeps all old positions (useful zero-infill diagnostic).
+- KEEP fractions .25/.5/.75, nearest integer count (half rounded up): drafter probability, verifier draft-token probability, old argmax-agreement ranked then probability, and3 deterministic random subsets at the same count.
+- Natural old agreement keeps every D[i]=old_top1[i], plus3 random controls with exactly that count.
+- Oracle A keeps every truly correct old token. Only if its accepted prefix does not beat fresh-L, search up to8 total deduplicated patterns: A, empty, prefixes/random subsets of the true-correct positions at .25/.5/.75. Oracle B is bounded and not globally optimal. Oracle information acquisition/search is excluded from single-arm timings, explicitly diagnostic.
+
+Non-oracle plan construction takes an immutable Observation with old tokens, drafter confidence, old verifier probabilities/argmax only. It cannot receive true future reference. Construct these plans before computing oracle masks. Hard false anchors remain wrong and can cap accepted prefix; no silent correction. Identical masks are deterministic aliases: infer once and copy the measured result, preserving mask_reused_from provenance. Random repeats are not independent prompts; uncertainty is clustered by prompt.
+
+Accepted prefix, token accuracy, KEEP precision, remasked accuracy, fully-correct rate, false anchors, recovered old KEEP tokens inside the new accepted prefix, forward counts and synchronized latency are exported per arm. Paired gains use the same event's fresh-L. A source's sampled events are not necessarily identical to the other source's; stratify instead of interpreting source differences causally.
+
+## Costs, uncertainty and interpretation
+
+Forward count distinguishes unmask, completed-prefix prefill and completed-block cache-update forwards, plus queried token counts. Cold prefix reconstruction, unmask time and cache-update time are separate counters; total draft time includes synchronization/Python scheduling. Mutable latency subtracts only cold prefill. Target feedback and reference costs are recorded separately. Event-level selector time covers plan construction, not model inference. These measurements are not a real online cache rollback/reverification pipeline; no speedup claim is supported.
+
+The SQLite store commits each unit transactionally, checkpoints via a consistent SQLite backup every25 new units and at normal/soft-budget/error exit, and exports JSONL/ZIP. Latest in-process SQLite records are more recent than the last ZIP if the session is killed abruptly. Preserve outputs with Kaggle Save Version/download before a new session. Model caches/weights are never archived. Soft wall budget is6h per run invocation, checked between units, not an assertion of completion within6h.
+
+Report mean/median/N and percentile95% bootstrap CI resampling prompts2000 times, preserving all their states/arms. Sparse one-prompt strata can have degenerate intervals; inspect N. Paired dLLM-minus-AR differences use only common states; both tails must be nonempty for rate differences. Test2 gains/win/tie/loss are paired within event, per method. Ten figures are descriptive aggregate views; inspect stratified summary CSV before conclusions. Partial results are clearly marked.
+
+Useful evidence to proceed: reusable suffixes with meaningful islands, positive paired oracle/fresh-L gains, feedback selectors approaching that headroom, and actual draft compute savings. Oracle improvement with poor feedback arms motivates selection/features; failure of the bounded oracles motivates geometry audits, mask-pattern and infilling investigations without uniquely identifying the cause. A subsequent online benchmark must include reverify, rollback, selector/search cost, EOS and complete output equality.

@@ -1,0 +1,28 @@
+# Validation record
+
+Development host: Windows, Python3.12.14, PyTorch2.9.0+cpu, Transformers4.53.3, einops0.8.1. Analysis checked with pandas2.2.3, matplotlib3.10.1, scikit-learn1.6.1 (local transitive NumPy2.5.4 / HF Hub0.36.2; Kaggle pins NumPy2.1.3 / HF Hub0.35.3). No pretrained model weights loaded locally.
+
+The local unittest suite completed **30 tests, no skips**. It checks:
+
+- Independent hand-computed first-rejection/suffix/shift examples, empty suffix/EOS horizon bounds, islands and false-anchor caps.
+- One MASK filled per step, maximum confidence restricted to earliest absolute active subblock, tie order, hard KEEP, independent branches and no output from padded positions.
+- Non-oracle interface isolation, deterministic selectors, matched KEEP counts, bounded correct-only oracle masks and stratified frozen sampling.
+- Committed SQLite resume, precision identity mismatch rejection, consistent hot backup/ZIP restoration and unsafe ZIP path rejection.
+- A complete synthetic teacher pipeline through paired Test1, Test2, rerun/resume and analysis; the fixture is not evidence of model quality.
+- Tiny random Qwen2: incremental greedy matches repeated full-prefix argmax and parallel shifted verification.
+- Tiny random model using **the exact hash-pinned Fast-dLLM remote source**: cached vs complete-prefix results at prefix lengths1/7/8/31/32/33/63/64/65, 35-token horizon across block boundaries, partial/full hard KEEP. No pretrained quality inference follows from random weights.
+- Notebook cells match the copyable Markdown, compile as Python, and the main config is exactly100 MATH-500 +100 GSM8K.
+- Empty partial outputs and populated synthetic outputs both produce all10 plots and summaries.
+
+The full optional checks need torch/transformers/einops plus analysis dependencies. Without them, optional tests explicitly skip; passing the dependency-free subset is not the same validation result. To fetch only pinned official source for the optional tiny-model test:
+
+```bash
+python scripts/review_upstream.py
+python -m unittest discover -s tests -v
+```
+
+`--refresh-lock` is an explicit new-source review operation, not part of running this frozen experiment. Kaggle cells instead point the test at the already downloaded pinned model source.
+
+**Not yet validated:** actual Qwen7B INT8/NF4 output equality, real Fast-dLLM FP16 cached/full equality, quantization/kernel behavior on two T4 GPUs, pretrained suffix quality, runtime/VRAM for the200-prompt pilot, or online speedup. Notebook preflight must establish real-model consistency before running; it stops rather than treating numerical inconsistencies as acceptance. Per-proposal causal/reference consistency is checked again throughout Test1.
+
+Source revisions and hashes are in `source-lock.json`. Run identity includes actual precision, full package inventory, Python/CUDA/driver/GPU, code commit/source hashes, exact config, tokenizer evidence and asset selection. Preflight cannot change an established run's precision. All timings include synchronization; model warmup occurs outside measured experiment arms and is logged.

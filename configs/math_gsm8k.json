@@ -1,0 +1,23 @@
+{
+  "seed": 42,
+  "datasets": ["math500", "gsm8k"],
+  "prompts_per_dataset": 100,
+  "prefixes_per_prompt": 5,
+  "reference_tokens": 256,
+  "proposal_length": 32,
+  "physical_block_size": 32,
+  "subblock_size": 8,
+  "mask_id": 151665,
+  "target_precision": "int8",
+  "allow_nf4_fallback": true,
+  "keep_ratios": [0.25, 0.5, 0.75],
+  "random_repeats": 3,
+  "oracle_subset_limit": 8,
+  "test2_events": 200,
+  "test2_sources": ["dllm_top1", "ar_greedy"],
+  "wall_hours": 6.0,
+  "bootstrap_samples": 2000,
+  "top_k": 8,
+  "max_prompt_tokens": 4096
+}
+

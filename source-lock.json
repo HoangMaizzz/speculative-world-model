@@ -1,0 +1,17 @@
+{
+  "models": {
+    "Efficient-Large-Model/Fast_dLLM_v2_1.5B": "25093b6f63300adfd57f72145083c8a528fe4f16",
+    "Qwen/Qwen2.5-1.5B-Instruct": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
+    "Qwen/Qwen2.5-7B-Instruct": "a09a35458c702b33eeacc393d103063234e8bc28"
+  },
+  "datasets": {
+    "openai/gsm8k": "740312add88f781978c0658806c59bc2815b9866",
+    "HuggingFaceH4/MATH-500": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+  },
+  "official_git_commit": "a9b81e4caa240c8cad4f7dc1889ff4852a0fca5b",
+  "source_sha256": {
+    "modeling.py": "7eced912363bdfa22bb5618b68b680a9e8c6c89d775ad5debc116cc0e733d274",
+    "configuration.py": "760e76af3a1fdf23e70868eea0d221aae186b41eafdfc35222e79e1d14b22f4c",
+    "config.json": "0e6cc1c221a7bb5ce1739a112ed06151beb6ae62813e69d6d879c502f12231f4"
+  }
+}
