@@ -1,83 +1,49 @@
-# Kaggle two-cell quickstart
+# Independent single-cell Kaggle runs
 
-Enable Internet and GPU T4 x2. Cell1 includes setup, correctness checks and smoke5+5. Cell2 runs100 MATH-500 +100 GSM8K after smoke; no earlier setup cell is needed. Public repo: no GitHub token. Setup uses the three reviewed cells at an immutable commit. Same-session resume: rerun the relevant cell. For new-session ZIP restore use math_gsm8k.ipynb.
+Enable Internet and GPU T4 x2; no GitHub token is required. Each cell works in a fresh kernel. Smoke runs5+5. Pilot runs100+100 with its own correctness checks; it never requires smoke globals/status. For Save Version, put ONLY the pilot cell in its own notebook, then Save & Run All. Separate one-code-cell files: math_gsm8k_smoke.ipynb and math_gsm8k_pilot.ipynb. Launcher/source revision and SHA256 are pinned. Both runs export ZIP and report complete/partial/failed. To resume a new session, attach exactly one matching ZIP as input and run the same cell; it restores automatically.
 
 ```python
-import json, os, subprocess
-from pathlib import Path
+# SMOKE 5 MATH + 5 GSM8K: this cell includes the entire setup and execution.
+import hashlib
 import urllib.request
+import torch
 
-if not (callable(globals().get("lab")) and
-        all(name in globals() for name in ("PY", "REPO", "WORK", "COMMIT"))):
-    setup_url = (
-        "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
-        "bc04842857cb5d739f89c9c9bc5acfbf5bd8254b/notebooks/math_gsm8k.ipynb"
-    )
-    with urllib.request.urlopen(setup_url, timeout=60) as response:
-        setup_notebook = json.load(response)
-    setup_cells = [c for c in setup_notebook["cells"] if c["cell_type"] == "code"]
-    for index, cell in enumerate(setup_cells[:3], start=1):
-        print(f"Setup {index}/3", flush=True)
-        exec(compile("".join(cell["source"]), f"setup-cell-{index}", "exec"), globals())
-assert callable(globals().get("lab")), "Setup did not define lab; inspect the preceding error."
+if torch.cuda.device_count() < 2:
+    raise RuntimeError("Select GPU T4 x2 and enable Internet in Kaggle Settings.")
 
-# Smoke: setup automatically, prepare 5+5, audit, then run both studies.
-lab("prepare", smoke=True)
-# 5. CPU contracts + tiny random official model checks, pretrained GPU audits, 5+5 smoke
-manifest = json.loads(Path("/tmp/suffix-assets/smoke/manifest.json").read_text())
-test_env = os.environ.copy()
-test_env["SUFFIX_UPSTREAM_DIR"] = manifest["paths"]["Efficient-Large-Model/Fast_dLLM_v2_1.5B"]
-subprocess.run([PY, "-m", "unittest", "discover", "-s", "tests", "-v"], env=test_env, check=True)
-lab("preflight", smoke=True)
-try:
-    lab("run", smoke=True)
-finally:
-    lab("analyze", smoke=True)
-    lab("pack", smoke=True)
-smoke_status = json.loads((WORK / "suffix_smoke/status.json").read_text())
-assert smoke_status["test2_complete"], "Finish or resume smoke before starting pilot."
-
-from IPython.display import display, FileLink
-display(FileLink(str(WORK / "suffix_smoke/suffix_checkpoint.zip")))
+_suffix_revision = "c4a25fafcdd66884c33ef7251f14a6bc6874a388"
+_suffix_url = (
+    "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
+    + _suffix_revision + "/scripts/kaggle_single_cell.py"
+)
+with urllib.request.urlopen(_suffix_url, timeout=60) as response:
+    _suffix_source = response.read()
+if hashlib.sha256(_suffix_source).hexdigest() != "d09babf75c46c32a6871c800a470be82b9593748968880a41e4a83b65f9b702e":
+    raise RuntimeError("Launcher checksum differs; execution stopped.")
+_suffix_scope = {"__name__": "__main__", "__file__": _suffix_url,
+                 "SUFFIX_MODE": "smoke", "SUFFIX_CODE_REVISION": _suffix_revision}
+exec(compile(_suffix_source, "kaggle-single-cell", "exec"), _suffix_scope)
 ```
 
 ```python
-import json, os, subprocess
-from pathlib import Path
+# PILOT 100 MATH + 100 GSM8K (Save Version): this cell includes the entire setup and execution.
+import hashlib
 import urllib.request
+import torch
 
-if not (callable(globals().get("lab")) and
-        all(name in globals() for name in ("PY", "REPO", "WORK", "COMMIT"))):
-    setup_url = (
-        "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
-        "bc04842857cb5d739f89c9c9bc5acfbf5bd8254b/notebooks/math_gsm8k.ipynb"
-    )
-    with urllib.request.urlopen(setup_url, timeout=60) as response:
-        setup_notebook = json.load(response)
-    setup_cells = [c for c in setup_notebook["cells"] if c["cell_type"] == "code"]
-    for index, cell in enumerate(setup_cells[:3], start=1):
-        print(f"Setup {index}/3", flush=True)
-        exec(compile("".join(cell["source"]), f"setup-cell-{index}", "exec"), globals())
-assert callable(globals().get("lab")), "Setup did not define lab; inspect the preceding error."
+if torch.cuda.device_count() < 2:
+    raise RuntimeError("Select GPU T4 x2 and enable Internet in Kaggle Settings.")
 
-# Pilot: run after smoke; rerun this cell to resume in the same session.
-PILOT = WORK / "suffix_pilot"
-assert (WORK / "suffix_smoke/status.json").exists(), "Run the smoke cell first; for a new-session checkpoint restore, use the full 7-cell notebook."
-assert json.loads((WORK / "suffix_smoke/status.json").read_text())["test2_complete"], "Finish smoke before preparing the pilot."
-lab("prepare")
-# 6. Main pilot: 100 MATH-500 + 100 GSM8K; resume by rerunning this cell
-assert json.loads((WORK / "suffix_smoke/status.json").read_text())["test2_complete"]
-# Reuse saved precision after restoring a run; Runner refuses any identity mismatch.
-if not (PILOT / "preflight.json").exists():
-    lab("preflight")
-try:
-    code = lab("run", allow_partial=True)
-finally:
-    lab("analyze")
-    lab("pack")
-print("Pilot paused at the soft wall budget; rerun cell 6 to resume." if code == 75 else "Pilot complete.")
-
-from IPython.display import display, Markdown, FileLink
-display(Markdown((PILOT / "analysis/REPORT.md").read_text()))
-display(FileLink(str(PILOT / "suffix_checkpoint.zip")))
+_suffix_revision = "c4a25fafcdd66884c33ef7251f14a6bc6874a388"
+_suffix_url = (
+    "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
+    + _suffix_revision + "/scripts/kaggle_single_cell.py"
+)
+with urllib.request.urlopen(_suffix_url, timeout=60) as response:
+    _suffix_source = response.read()
+if hashlib.sha256(_suffix_source).hexdigest() != "d09babf75c46c32a6871c800a470be82b9593748968880a41e4a83b65f9b702e":
+    raise RuntimeError("Launcher checksum differs; execution stopped.")
+_suffix_scope = {"__name__": "__main__", "__file__": _suffix_url,
+                 "SUFFIX_MODE": "pilot", "SUFFIX_CODE_REVISION": _suffix_revision}
+exec(compile(_suffix_source, "kaggle-single-cell", "exec"), _suffix_scope)
 ```

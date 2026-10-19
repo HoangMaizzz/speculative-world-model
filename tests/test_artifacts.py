@@ -4,6 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 import io
+import hashlib
+from types import SimpleNamespace
 from unittest.mock import patch
 from suffix_lab.assets import ROOT
 from suffix_lab.store import Store
@@ -40,7 +42,34 @@ class ArtifactTests(unittest.TestCase):
         for i, cell in enumerate(cells):
             compile(cell, f"quick-cell-{i}", "exec")
             self.assertIn(cell, markdown)
-            self.assertTrue(cell.startswith(module.SETUP_BOOTSTRAP))
+            self.assertIn("torch.cuda.device_count() < 2", cell)
+
+    def test_each_standalone_file_has_exactly_one_code_cell(self):
+        module = self.builder()
+        for mode in ("smoke", "pilot"):
+            notebook = json.loads((ROOT/f"notebooks/math_gsm8k_{mode}.ipynb").read_text())
+            cells = ["".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code"]
+            self.assertEqual(cells, [module.single_cell(mode)])
+            self.assertNotIn('lab(', cells[0])
+            self.assertNotIn('suffix_smoke/status.json', cells[0])
+
+    def test_standalone_cells_execute_in_separate_empty_namespaces(self):
+        module = self.builder()
+        payload = b"observed_mode = SUFFIX_MODE\nobserved_revision = SUFFIX_CODE_REVISION\n"
+        fake_torch = SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 2))
+        for mode in ("smoke", "pilot"):
+            namespace = {}
+            with patch.dict("sys.modules", {"torch": fake_torch}), \
+                 patch("urllib.request.urlopen", return_value=io.BytesIO(payload)), \
+                 patch("hashlib.sha256", return_value=SimpleNamespace(hexdigest=lambda: module.SINGLE_CELL_SHA256)):
+                exec(compile(module.single_cell(mode), mode, "exec"), namespace)
+            self.assertEqual(namespace["_suffix_scope"]["observed_mode"], mode)
+            self.assertEqual(namespace["_suffix_scope"]["observed_revision"], module.SINGLE_CELL_REVISION)
+
+    def test_standalone_checksum_matches_the_reviewed_launcher(self):
+        module = self.builder()
+        raw = (ROOT/"scripts/kaggle_single_cell.py").read_text(encoding="utf-8").encode()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), module.SINGLE_CELL_SHA256)
 
     def test_notebook_and_copyable_cells_match_and_compile(self):
         spec = importlib.util.spec_from_file_location("build_notebook", ROOT/"scripts/build_notebook.py")

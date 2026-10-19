@@ -16,9 +16,10 @@ Vòng đầu: **100 MATH-500 + 100 GSM8K**, seed 42. Tối đa 5 shared prefixes
 
 1. Notebook Settings: **Internet ON, GPU T4 x2**.
 2. Repo public: không cần GitHub token. Nếu repo vẫn private: add/enable Kaggle Secret **GITHUB_TOKEN** có quyền đọc repo. Không dán token vào cell. HF_TOKEN tùy chọn.
-3. Dễ nhất: import [notebooks/math_gsm8k_two_cells.ipynb](notebooks/math_gsm8k_two_cells.ipynb) hoặc copy **hai cell tự setup** từ [KAGGLE_TWO_CELLS.md](KAGGLE_TWO_CELLS.md). Chạy cell1 smoke trước, rồi cell2 pilot. Không cần định nghĩa `lab` thủ công. Nếu cần restore ZIP phiên mới, dùng bản đầy đủ [notebooks/math_gsm8k.ipynb](notebooks/math_gsm8k.ipynb) hoặc [KAGGLE_CELLS.md](KAGGLE_CELLS.md).
-4. Trong bản7cell, cell5 chạy CPU audits, pretrained GPU preflight và smoke5+5. Chỉ chạy cell6 sau khi smoke hoàn tất.
-5. Trong bản7cell, cell6 chạy pilot100+100 và tự checkpoint; rerun để tiếp tục khi đạt soft budget. Cell7 hiện report, đủ10plots và ZIP.
+3. Import bản **một code cell** phù hợp: [smoke5+5](notebooks/math_gsm8k_smoke.ipynb) hoặc [pilot100+100](notebooks/math_gsm8k_pilot.ipynb). Có thể copy từng cell từ [KAGGLE_TWO_CELLS.md](KAGGLE_TWO_CELLS.md). Mỗi cell tự setup và chạy correctness checks; không cần biến `lab`, không cần smoke status trong phiên test thật.
+4. Để Save Version chạy thật, dùng notebook pilot riêng chỉ chứa một code cell, chọn **Save Version → Save & Run All**. Không để cell smoke trong notebook này, vì Save & Run All sẽ chạy lại mọi cell từ đầu. Internet vàT4x2 cần bật trong notebook được lưu.
+5. Cả hai bản tự xuất ZIP/report/10plots, phân biệt complete/partial/failed và khôi phục ZIP đúng mode/config/commit được attach vào `/kaggle/input`. Kết quả cũ khác code revision được giữ nguyên; launcher chọn output riêng cho revision mới. Phiên Save Version không dùng biến/cache RAM của phiên interactive.
+Notebook7cell cũ vẫn được giữ để xem chi tiết từng giai đoạn. Bản một cell dùng runtime/source commit cố định `c4a25fafcdd66884c33ef7251f14a6bc6874a388`, kiểm SHA256 launcher trước khi thực thi; không lấy code mới tùy theo branch head khi Save Version chạy sau này.
 
 Notebook dùng môi trường riêng trong `/tmp`, Torch 2.9.0 CUDA12.6 và dependency pins để tránh package đã import trong Kaggle kernel. Model cache trong `/tmp`, không nằm trong artifact. Commit thực tế, package versions, precision và GPU được ghi vào identity.
 
@@ -42,7 +43,7 @@ suffix-lab pack --output outputs/pilot
 
 `run --stage references|test1|test2` cho phép chia giai đoạn; Test 2 chỉ lấy mẫu sau khi toàn Test 1 hoàn tất. Soft budget mặc định 6 giờ **mỗi lần gọi run**, code75 = partial/resumable, code khác = lỗi cần xử lý. Thời gian chuẩn bị tải model/preflight nằm ngoài budget này. Chưa khẳng định toàn pilot sẽ xong trong một phiên.
 
-Resume cùng thư mục: chạy lại `run`. Resume phiên mới: tải ZIP hoặc Save Version outputs, đưa ZIP vào private Kaggle Dataset rồi attach; cell4 chỉ chọn checkpoint đúng commit/config. Nếu có nhiều checkpoint phù hợp, giữ một bản mong muốn. Không tự trộn partial runs. Identity khác precision, code commit, packages, GPU, tokenization hay config sẽ bị từ chối; dùng môi trường cũ hoặc output mới. Không rerun preflight để đổi precision của run đang có.
+Resume cùng thư mục: chạy lại cell tương ứng hoặc `run`. Resume phiên mới: tải ZIP hoặc Save Version outputs, đưa ZIP vào private Kaggle Dataset rồi attach; bản một cell tự chọn checkpoint đúng mode/config/commit. Nếu có nhiều checkpoint phù hợp, giữ một bản mong muốn. Không tự trộn partial runs. Identity khác precision, code commit, packages, GPU, tokenization hay config sẽ bị từ chối; dùng môi trường cũ hoặc output mới. Preflight giữ precision đã chốt của run đang có.
 
 ## Source
 

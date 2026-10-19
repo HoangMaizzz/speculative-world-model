@@ -168,18 +168,38 @@ if not (callable(globals().get("lab")) and
 assert callable(globals().get("lab")), "Setup did not define lab; inspect the preceding error."
 '''
 
-QUICK_CELLS = [
-    SETUP_BOOTSTRAP + '\n# Smoke: setup automatically, prepare 5+5, audit, then run both studies.\n'
-    + 'lab("prepare", smoke=True)\n'
-    + CELLS[4].replace('/tmp/suffix-assets/pilot/manifest.json', '/tmp/suffix-assets/smoke/manifest.json')
-    + '\nfrom IPython.display import display, FileLink\ndisplay(FileLink(str(WORK / "suffix_smoke/suffix_checkpoint.zip")))\n',
-    SETUP_BOOTSTRAP + '\n# Pilot: run after smoke; rerun this cell to resume in the same session.\n'
-    + 'PILOT = WORK / "suffix_pilot"\n'
-    + 'assert (WORK / "suffix_smoke/status.json").exists(), "Run the smoke cell first; for a new-session checkpoint restore, use the full 7-cell notebook."\n'
-    + 'assert json.loads((WORK / "suffix_smoke/status.json").read_text())["test2_complete"], "Finish smoke before preparing the pilot."\n'
-    + 'lab("prepare")\n' + CELLS[5]
-    + '\nfrom IPython.display import display, Markdown, FileLink\ndisplay(Markdown((PILOT / "analysis/REPORT.md").read_text()))\ndisplay(FileLink(str(PILOT / "suffix_checkpoint.zip")))\n'
-]
+SINGLE_CELL_REVISION = "c4a25fafcdd66884c33ef7251f14a6bc6874a388"
+SINGLE_CELL_SHA256 = "d09babf75c46c32a6871c800a470be82b9593748968880a41e4a83b65f9b702e"
+
+
+def single_cell(mode):
+    if mode not in ("smoke", "pilot"):
+        raise ValueError(mode)
+    title = "SMOKE 5 MATH + 5 GSM8K" if mode == "smoke" else "PILOT 100 MATH + 100 GSM8K (Save Version)"
+    return f'''# {title}: this cell includes the entire setup and execution.
+import hashlib
+import urllib.request
+import torch
+
+if torch.cuda.device_count() < 2:
+    raise RuntimeError("Select GPU T4 x2 and enable Internet in Kaggle Settings.")
+
+_suffix_revision = "{SINGLE_CELL_REVISION}"
+_suffix_url = (
+    "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
+    + _suffix_revision + "/scripts/kaggle_single_cell.py"
+)
+with urllib.request.urlopen(_suffix_url, timeout=60) as response:
+    _suffix_source = response.read()
+if hashlib.sha256(_suffix_source).hexdigest() != "{SINGLE_CELL_SHA256}":
+    raise RuntimeError("Launcher checksum differs; execution stopped.")
+_suffix_scope = {{"__name__": "__main__", "__file__": _suffix_url,
+                 "SUFFIX_MODE": "{mode}", "SUFFIX_CODE_REVISION": _suffix_revision}}
+exec(compile(_suffix_source, "kaggle-single-cell", "exec"), _suffix_scope)
+'''
+
+
+QUICK_CELLS = [single_cell("smoke"), single_cell("pilot")]
 
 
 def build():
@@ -199,11 +219,13 @@ def build():
                    "outputs": [], "source": source.splitlines(True)} for i, source in enumerate(cells)]}
     (destination/"math_gsm8k.ipynb").write_text(json.dumps(notebook, indent=2), encoding="utf-8")
     (ROOT/"KAGGLE_CELLS.md").write_text(intro+"\n"+"\n\n".join("```python\n"+source+"```" for source in cells)+"\n", encoding="utf-8")
-    quick_intro = ("# Kaggle two-cell quickstart\n\n"
-                   "Enable Internet and GPU T4 x2. Cell1 includes setup, correctness checks and smoke5+5. "
-                   "Cell2 runs100 MATH-500 +100 GSM8K after smoke; no earlier setup cell is needed. "
-                   "Public repo: no GitHub token. Setup uses the three reviewed cells at an immutable commit. "
-                   "Same-session resume: rerun the relevant cell. For new-session ZIP restore use math_gsm8k.ipynb.\n")
+    quick_intro = ("# Independent single-cell Kaggle runs\n\n"
+                   "Enable Internet and GPU T4 x2; no GitHub token is required. Each cell works in a fresh kernel. "
+                   "Smoke runs5+5. Pilot runs100+100 with its own correctness checks; it never requires smoke globals/status. "
+                   "For Save Version, put ONLY the pilot cell in its own notebook, then Save & Run All. "
+                   "Separate one-code-cell files: math_gsm8k_smoke.ipynb and math_gsm8k_pilot.ipynb. "
+                   "Launcher/source revision and SHA256 are pinned. Both runs export ZIP and report complete/partial/failed. "
+                   "To resume a new session, attach exactly one matching ZIP as input and run the same cell; it restores automatically.\n")
     quick_notebook = {**notebook, "cells": [
         {"cell_type": "markdown", "id": "quickstart", "metadata": {}, "source": quick_intro.splitlines(True)}] +
         [{"cell_type": "code", "id": f"quick-{i+1}", "metadata": {}, "execution_count": None,
@@ -211,6 +233,12 @@ def build():
     (destination/"math_gsm8k_two_cells.ipynb").write_text(json.dumps(quick_notebook, indent=2), encoding="utf-8")
     (ROOT/"KAGGLE_TWO_CELLS.md").write_text(quick_intro+"\n"+"\n\n".join(
         "```python\n"+source+"```" for source in QUICK_CELLS)+"\n", encoding="utf-8")
+    for mode, source in zip(("smoke", "pilot"), QUICK_CELLS):
+        standalone = {**notebook, "cells": [
+            {"cell_type": "markdown", "id": mode+"-intro", "metadata": {}, "source": quick_intro.splitlines(True)},
+            {"cell_type": "code", "id": mode+"-run", "metadata": {}, "execution_count": None,
+             "outputs": [], "source": source.splitlines(True)}]}
+        (destination/f"math_gsm8k_{mode}.ipynb").write_text(json.dumps(standalone, indent=2), encoding="utf-8")
     return cells
 
 
