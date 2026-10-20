@@ -103,6 +103,28 @@ def tokenizers(paths):
     return base, evidence
 
 
+def describe_logits(logits, proposal, top_k):
+    import torch
+    probs = logits.softmax(-1)
+    if not 2 <= top_k <= logits.shape[-1]:
+        raise ValueError("top_k must be between two and the vocabulary size")
+    # topk is not stable for tied logits. Its first ID must never define
+    # greedy acceptance: use exactly the argmax rule used in draft().
+    winner = logits.argmax(-1, keepdim=True)
+    remaining = logits.clone().scatter_(1, winner, -torch.inf)
+    others = remaining.topk(top_k-1, -1).indices
+    tok = torch.cat((winner, others), dim=1)
+    p = probs.gather(1, tok)
+    draft_p = probs.gather(1, torch.tensor(proposal, device=logits.device)[:, None]).squeeze(1)
+    entropy = -(probs * probs.clamp_min(1e-38).log()).sum(-1)
+    answer = {"top1": tok[:, 0].tolist(), "probability": draft_p.tolist(),
+              "top1_probability": p[:, 0].tolist(), "margin": (p[:, 0]-p[:, 1]).tolist(),
+              "logit_margin": (logits.gather(1, winner).squeeze(1)-
+                               logits.gather(1, others[:, :1]).squeeze(1)).tolist(),
+              "entropy": entropy.tolist(), "topk_ids": tok.tolist(), "topk_probs": p.tolist()}
+    return answer
+
+
 class ARSession:
     def __init__(self, model):
         self.model = model
@@ -187,26 +209,58 @@ class ARSession:
             logits = self.model(ids, use_cache=False, logits_to_keep=len(proposal)+1).logits[0, :-1].float()
             if logits.shape[0] != len(proposal):
                 raise AssertionError("Shifted verifier row count differs")
-            probs = logits.softmax(-1)
-            if not 2 <= top_k <= logits.shape[-1]:
-                raise ValueError("top_k must be between two and the vocabulary size")
-            # topk is not stable for tied logits. Its first ID must never define
-            # greedy acceptance: use exactly the argmax rule used in draft().
-            winner = logits.argmax(-1, keepdim=True)
-            remaining = logits.clone().scatter_(1, winner, -torch.inf)
-            others = remaining.topk(top_k-1, -1).indices
-            tok = torch.cat((winner, others), dim=1)
-            p = probs.gather(1, tok)
-            draft_p = probs.gather(1, torch.tensor(proposal, device=logits.device)[:, None]).squeeze(1)
-            entropy = -(probs * probs.clamp_min(1e-38).log()).sum(-1)
-            answer = {"top1": tok[:, 0].tolist(), "probability": draft_p.tolist(),
-                      "top1_probability": p[:, 0].tolist(), "margin": (p[:, 0]-p[:, 1]).tolist(),
-                      "logit_margin": (logits.gather(1, winner).squeeze(1)-
-                                       logits.gather(1, others[:, :1]).squeeze(1)).tolist(),
-                      "entropy": entropy.tolist(), "topk_ids": tok.tolist(), "topk_probs": p.tolist()}
+            answer = describe_logits(logits, proposal, top_k)
         sync_model(self.model)
         answer["latency_ms"] = (time.perf_counter()-begin)*1000
         answer["input_tokens"] = len(prefix) + len(proposal)
+        return answer
+
+
+    def score_replay(self, prompt, committed, proposal, top_k=8):
+        if self.timer is None:
+            answer = self._score_replay(prompt, committed, proposal, top_k)
+            answer["latency_policy"] = "single_device_synchronized_wall_no_peer_transfer"
+            return answer
+        with self.timer.measure():
+            answer = self._score_replay(prompt, committed, proposal, top_k)
+        answer.update(self.timer.report(answer["latency_ms"]))
+        return answer
+
+    def _score_replay(self, prompt, committed, proposal, top_k):
+        """Original prompt prefill, then ONE token per forward, exactly as reference.
+
+        Re-prefilling prompt+committed in one batch would repeat the same shape
+        mismatch. Check each committed token against model argmax before feeding it.
+        Cache is local to this call and is never reused by another arm.
+        """
+        import torch
+        from .verification import VerificationError
+        sync_model(self.model)
+        begin = time.perf_counter()
+        rows = []
+        with torch.inference_mode():
+            out = self.model(torch.tensor([prompt], device=self.device), use_cache=True, logits_to_keep=1)
+            cache, logits = out.past_key_values, out.logits[0, -1].float()
+            for i, token in enumerate(committed):
+                if int(logits.argmax()) != token:
+                    raise VerificationError({"stage": "committed_prefix_replay", "position": i,
+                        "expected_token": token, "actual": describe_logits(logits[None], [token], top_k)})
+                out = self.model(torch.tensor([[token]], device=self.device), past_key_values=cache,
+                                 use_cache=True, logits_to_keep=1)
+                cache, logits = out.past_key_values, out.logits[0, -1].float()
+            for i, token in enumerate(proposal):
+                rows.append(logits)
+                if i+1 < len(proposal):
+                    out = self.model(torch.tensor([[token]], device=self.device), past_key_values=cache,
+                                     use_cache=True, logits_to_keep=1)
+                    cache, logits = out.past_key_values, out.logits[0, -1].float()
+            answer = describe_logits(torch.stack(rows), proposal, top_k)
+        sync_model(self.model)
+        answer.update(latency_ms=(time.perf_counter()-begin)*1000,
+            input_tokens=len(prompt)+len(committed)+max(0, len(proposal)-1),
+            replay_forwards=1+len(committed)+max(0, len(proposal)-1),
+            replay_prefix_tokens=len(committed), replay_schedule="original_prompt_prefill_then_single_token",
+            wall_latency_ms=(time.perf_counter()-begin)*1000)
         return answer
 
 

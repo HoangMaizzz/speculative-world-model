@@ -74,7 +74,12 @@ def run_repairs(runner):
                     if previous is None:
                         begin = time.perf_counter()
                         result = drafter.draft(prefix, len(old), anchors=anchors)
-                        feedback = runner.verifier.score(prefix, result.tokens, c["top_k"])
+                        from .verification import checked_score, VerificationError
+                        try:
+                            feedback = checked_score(runner.verifier, ref, row["offset"]+r, result.tokens, c["top_k"])
+                        except VerificationError as error:
+                            store.put("failure", key, {"reason": "repair canonical replay consistency", "evidence": error.evidence})
+                            raise
                         accepted = prefix_length(result.tokens, feedback["top1"])
                         expected = prefix_length(result.tokens, gold)
                         if accepted != expected or (accepted < len(old) and feedback["top1"][accepted] != gold[accepted]):
@@ -82,7 +87,7 @@ def run_repairs(runner):
                                 "tokens": result.tokens, "reference": gold, "feedback": feedback})
                             raise AssertionError("Repair target/reference disagree: "+key)
                         measured = {"tokens": result.tokens, "stats": result.stats,
-                            "verification": {k: feedback[k] for k in ("top1", "latency_ms", "wall_latency_ms", "latency_policy", "input_tokens", "compute_by_device_ms", "timed_stage_calls", "timed_stages") if k in feedback},
+                            "verification": {k: feedback[k] for k in ("top1", "latency_ms", "wall_latency_ms", "latency_policy", "input_tokens", "compute_by_device_ms", "timed_stage_calls", "timed_stages", "verification_mode", "parallel_disagreement", "replay_timing", "replay_forwards", "replay_prefix_tokens") if k in feedback},
                             "verified_accepted_prefix": accepted,
                             "pipeline_wall_ms": (time.perf_counter()-begin)*1000}
                     else:

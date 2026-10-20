@@ -55,7 +55,10 @@ def execute(mode, revision, assets, output, input_root="/kaggle/input", run=subp
 
     try:
         if not (output/"run.sqlite").exists():
-            checkpoint = matching_checkpoint(input_root, cfg, revision)
+            unpacked = os.environ.get("SUFFIX_RESUME_ROOT")
+            if unpacked:
+                cli("import-checkpoint", ("--checkpoint-root", unpacked, "--revision", revision))
+            checkpoint = None if unpacked else matching_checkpoint(input_root, cfg, revision)
             if checkpoint:
                 # restore requires an empty destination; no status files are written yet.
                 if any(output.iterdir()):
@@ -66,6 +69,8 @@ def execute(mode, revision, assets, output, input_root="/kaggle/input", run=subp
         manifest = json.loads((assets/"manifest.json").read_text())
         phase = "unit_checks"
         test_env = dict(os.environ)
+        # Unit orchestration fixtures must not inherit the real migration input.
+        test_env.pop("SUFFIX_RESUME_ROOT", None)
         test_env["SUFFIX_UPSTREAM_DIR"] = manifest["paths"]["Efficient-Large-Model/Fast_dLLM_v2_1.5B"]
         tests = [sys.executable, "-u", "-m", "unittest", "discover", "-s", "tests", "-v"]
         checked = run(tests, cwd=ROOT, env=test_env)

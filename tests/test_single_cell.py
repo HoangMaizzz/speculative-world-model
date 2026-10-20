@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import patch
 import unittest
 import zipfile
 from suffix_lab.assets import ROOT
@@ -20,6 +21,17 @@ def runner_module():
 
 
 class StandaloneTests(unittest.TestCase):
+    def test_explicit_unpacked_checkpoint_root_is_forwarded_before_prepare(self):
+        module = runner_module()
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"SUFFIX_RESUME_ROOT": "/kaggle/input/datasets/ainzkhail/checkpoint"}):
+            assets, output = Path(tmp)/"assets", Path(tmp)/"pilot"
+            calls = []
+            self.execute_fixture(module, "pilot", "a"*40, assets, output, Path(tmp)/"input",
+                                 self.fake_run(assets, output, calls))
+            self.assertEqual(calls[0][0], "import-checkpoint")
+            self.assertIn("/kaggle/input/datasets/ainzkhail/checkpoint", calls[0][1])
+            self.assertEqual(calls[1][0], "prepare")
+
     def execute_fixture(self, module, *args):
         # Fixture completion messages must not look like real notebook progress.
         with redirect_stdout(io.StringIO()):

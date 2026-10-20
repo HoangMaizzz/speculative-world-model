@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = [".gitignore", "README.md", "pyproject.toml", "requirements-kaggle.txt", "source-lock.json", "KAGGLE_CELLS.md", "KAGGLE_TWO_CELLS.md"]
+FILES = [".gitignore", "README.md", "pyproject.toml", "requirements-kaggle.txt", "source-lock.json", "KAGGLE_CELLS.md", "KAGGLE_TWO_CELLS.md", "KAGGLE_RESUME.md"]
 files = [ROOT/name for name in FILES]
 for directory in ("src", "tests", "scripts", "configs", "docs", "notebooks"):
     files.extend(p for p in (ROOT/directory).rglob("*") if p.is_file() and p.suffix in (".py", ".md", ".json", ".ipynb"))

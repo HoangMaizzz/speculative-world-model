@@ -15,6 +15,23 @@ from suffix_lab.store import Store
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_unpacked_resume_notebook_is_one_self_contained_pilot_cell(self):
+        module = self.builder()
+        notebook = json.loads((ROOT/"notebooks/math_gsm8k_resume.ipynb").read_text())
+        cells = ["".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code"]
+        self.assertEqual(cells, [module.resume_cell()])
+        self.assertIn(cells[0], (ROOT/"KAGGLE_RESUME.md").read_text())
+        payload = b"observed_mode=SUFFIX_MODE\nobserved_revision=SUFFIX_CODE_REVISION\n"
+        namespace = {}
+        fake_torch = SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 2))
+        with patch.dict("os.environ", {}, clear=False), patch("pathlib.Path.is_dir", return_value=True), \
+             patch.dict("sys.modules", {"torch": fake_torch}), \
+             patch("urllib.request.urlopen", return_value=io.BytesIO(payload)), \
+             patch("hashlib.sha256", return_value=SimpleNamespace(hexdigest=lambda: module.SINGLE_CELL_SHA256)):
+            exec(compile(cells[0], "resume-cell", "exec"), namespace)
+            self.assertEqual(Path(os.environ["SUFFIX_RESUME_ROOT"]), Path("/kaggle/input/datasets/ainzkhail/checkpoint"))
+            self.assertEqual(namespace["_suffix_scope"]["observed_mode"], "pilot")
+
     def builder(self):
         spec = importlib.util.spec_from_file_location("build_notebook", ROOT/"scripts/build_notebook.py")
         module = importlib.util.module_from_spec(spec)

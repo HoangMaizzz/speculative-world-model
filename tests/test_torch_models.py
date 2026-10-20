@@ -47,6 +47,9 @@ class TinyModelTests(unittest.TestCase):
                 ids = torch.tensor([prefix+a.tokens[:i]])
                 expected.append(int(model(ids, use_cache=False).logits[0, -1].argmax()))
         self.assertEqual(expected, a.tokens)
+        replay = session.score_replay(prefix, a.tokens[:5], a.tokens[5:])
+        self.assertEqual(replay["top1"], a.tokens[5:])
+        self.assertEqual(replay["replay_forwards"], 12)
 
     def test_constrained_ar_forces_into_kv_and_preserves_causal_negative_control(self):
         import torch

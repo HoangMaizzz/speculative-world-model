@@ -111,7 +111,7 @@ def pack(output):
     if db.exists():
         store = Store(db)
         store.backup(output / "checkpoint.sqlite")
-        for kind in ("reference", "test1", "test2", "repair_plan", "oracle_search", "pair_complete"):
+        for kind in ("reference", "test1", "test2", "repair_plan", "oracle_search", "pair_complete", "migration_replay", "prior_failure"):
             store.export(kind, output / (kind+".jsonl"))
         store.close()
     path = output / "suffix_checkpoint.zip"
@@ -183,14 +183,30 @@ class Runner:
                         target_device_map={name: str(device) for name, device in self.target.hf_device_map.items()},
                         target_latency_policy="cuda_stage_events_excluding_dispatch_copies",
                         allow_fp16_reduced_precision_reduction=torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction)
-        identity = {"protocol": "suffix-top1-v4-two-cohort-repairability", "config": config,
+        identity = {"protocol": "suffix-top1-v4-audited-canonical-replay", "config": config,
                     "source_digest": source_digest(),
                     "asset_digest": manifest["content_digest"], "target_precision": precision,
                     "tokenizer": token_evidence, "environment": self.env}
+        pending = Store(self.output/"run.sqlite")
+        imported = pending.get("meta", "migration_pending")
+        provenance = pending.get("meta", "import_provenance")
+        pending.close()
+        if imported:
+            from .migration import validate_identity
+            validate_identity(imported, identity)
+        if provenance:
+            identity["import_provenance"] = provenance
+        identity["verification_policy"] = "offline_parallel_audit_with_model_canonical_replay_on_disagreement"
         self.store = Store(self.output / "run.sqlite", identity)
         atomic_json(self.output / "run-manifest.json", identity)
         self.deadline = time.monotonic() + config["wall_hours"] * 3600
         self.completed_units = 0
+        if imported:
+            from .migration import replay_prior_failures
+            audit = replay_prior_failures(self.verifier, self.store, config["top_k"])
+            self.store.put("meta", "migration_validated", audit)
+            self.store.put("meta", "migration_pending", None)
+            atomic_json(self.output/"migration_replay.json", audit)
 
     def checkpoint(self):
         self.completed_units += 1
@@ -244,7 +260,12 @@ class Runner:
                         prefix = ref["prompt_ids"] + ref["tokens"][:offset]
                         gold = ref["tokens"][offset:offset+c["proposal_length"]]
                         draft = drafter.draft(prefix, c["proposal_length"])
-                        feedback = self.verifier.score(prefix, draft.tokens, c["top_k"])
+                        from .verification import checked_score, VerificationError
+                        try:
+                            feedback = checked_score(self.verifier, ref, offset, draft.tokens, c["top_k"])
+                        except VerificationError as error:
+                            self.store.put("failure", key, {"reason": "canonical replay consistency", "evidence": error.evidence})
+                            raise
                         m = suffix_metrics(draft.tokens, gold, feedback["top1"])
                         old_k = prefix_length(draft.tokens, feedback["top1"])
                         # Before first mismatch draft/true prefixes coincide. Parallel vs

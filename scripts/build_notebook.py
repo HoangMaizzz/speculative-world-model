@@ -201,6 +201,14 @@ exec(compile(_suffix_source, "kaggle-single-cell", "exec"), _suffix_scope)
 '''
 
 
+def resume_cell():
+    source = single_cell("pilot")
+    source = source.replace("# PILOT 100 MATH + 100 GSM8K (Save Version)", "# RESUME PILOT 100 MATH + 100 GSM8K")
+    source = source.replace("import hashlib", 'import os\nfrom pathlib import Path\nimport hashlib', 1)
+    source = source.replace("_suffix_revision =", 'checkpoint_root = Path("/kaggle/input/datasets/ainzkhail/checkpoint")\nif not checkpoint_root.is_dir():\n    raise RuntimeError("Attach the unpacked checkpoint dataset at the configured path.")\nos.environ["SUFFIX_RESUME_ROOT"] = str(checkpoint_root)\n\n_suffix_revision =', 1)
+    return source
+
+
 QUICK_CELLS = [single_cell("smoke"), single_cell("pilot")]
 
 
@@ -241,6 +249,10 @@ def build():
             {"cell_type": "code", "id": mode+"-run", "metadata": {}, "execution_count": None,
              "outputs": [], "source": source.splitlines(True)}]}
         (destination/f"math_gsm8k_{mode}.ipynb").write_text(json.dumps(standalone, indent=2), encoding="utf-8")
+    resume = resume_cell()
+    (ROOT/"KAGGLE_RESUME.md").write_text("# Resume an unpacked pilot checkpoint\n\nThe input is read-only. Legacy audited v4 references/passing proposals are imported and the archived failure is replayed before continuation. New-runtime checkpoints can also be resumed from the same unpacked layout.\n\n```python\n"+resume+"```\n", encoding="utf-8")
+    resume_notebook = {**notebook, "cells": [{"cell_type": "code", "id": "resume-pilot", "metadata": {}, "execution_count": None, "outputs": [], "source": resume.splitlines(True)}]}
+    (destination/"math_gsm8k_resume.ipynb").write_text(json.dumps(resume_notebook, indent=2), encoding="utf-8")
     return cells
 
 

@@ -57,6 +57,7 @@ def analyze(output, bootstrap_samples=2000):
                       "draft_forwards": row["draft"]["stats"]["total_forwards"],
                       "verify_compute_ms": row["feedback"].get("latency_ms"),
                       "verify_wall_ms": row["feedback"].get("wall_latency_ms"),
+                      "verification_mode": row["feedback"].get("verification_mode", "imported_parallel_audit_passed"),
                       "progress_bin": row.get("progress_bin", "unknown") })
         for i in range(m["first_rejection"], len(row["draft"]["tokens"])):
             token_rows.append({"id": row["id"], "prompt_id": row["prompt_id"], "dataset": row["dataset"],
@@ -98,6 +99,7 @@ def analyze(output, bootstrap_samples=2000):
                         "t_draft_wall_ms": row["stats"]["latency_ms"],
                         "t_verify_compute_ms": row.get("verification", {}).get("latency_ms"),
                         "t_verify_wall_ms": row.get("verification", {}).get("wall_latency_ms"),
+                        "verification_mode": row.get("verification", {}).get("verification_mode", "parallel"),
                         "t_draft_plus_verify_compute_ms": compute_work(row),
                         "draft_plus_verify_compute_delta_ms": difference(compute_work(row), compute_work(baseline)),
                         "t_selector_ms_event": row.get("selector_ms_event"),
@@ -315,6 +317,11 @@ def analyze(output, bootstrap_samples=2000):
             "no_observed_gain_pairs": sum(x["no_observed_gain"] for x in event_causes if x["cohort"] == cohort)}
             for cohort in sorted({x["cohort"] for x in event_causes})},
         "conditioning_arms": len(controls), "cross_redrafter_comparisons": len(cross)}
+    report["verification_replay"] = {
+        "test1_fallback_rows": sum(r["feedback"].get("verification_mode") == "canonical_replay_after_parallel_disagreement" for r in one),
+        "test2_fallback_logical_arms": sum(r.get("verification", {}).get("verification_mode") == "canonical_replay_after_parallel_disagreement" for r in two),
+        "migration_replays": len(store.rows("migration_replay")),
+        "policy": "offline reference audit; model replay from original prompt on mismatch; both attempts and prefix replay charged; not online SD latency"}
     from .cohort_report import write_cohort_report
     report["cohort_design"] = write_cohort_report(store, two, frame2, destination)
     atomic_json(destination / "report.json", report)
@@ -331,6 +338,7 @@ def analyze(output, bootstrap_samples=2000):
     text += "Partial runs are not completed pilot results. Decide whether to build an online method only after complete results and uncertainty show useful paired suffix headroom, oracle gain and measurable compute savings.\n"
     text += "\nProtocol v4: representative and repairability-enriched groups are DISJOINT and never pooled for population conclusions. Representative population estimates use explicit inclusion weights and are withheld until all its strata and arm outcomes are covered. Unweighted summary.csv bootstrap describes each selected cohort, not a design-weighted population CI. See representative_population_estimates.json, sampling_membership.csv, benefit_outcomes.csv, oracle_comparison.json and efficiency.csv. Old-token Oracle KEEP, bounded old-mask search and future-reference injection are separate; injection is not old reuse. Three anchor seeds/layouts are paired within each event and are correlated repeats, not additional independent events.\n"
     text += "Differences compare these trained checkpoints and schedules; they do not isolate architecture from training or other model differences.\n"
+    text += "Verification recovery is an OFFLINE reference-audited policy: if parallel acceptance/correction disagrees, replay the original prompt and committed reference prefix tokenwise with fresh KV, independently checking model argmax at each committed token. Never replace model logits with reference labels. Both attempts and replay-prefix costs are charged; raw parallel evidence is retained. Imported v4 passing rows retain their original timing and provenance. This fallback trigger uses offline labels and cannot be presented as a deployable online verifier or used to claim online speedup.\n"
     (destination / "REPORT.md").write_text(text, encoding="utf-8")
     store.close()
     return report

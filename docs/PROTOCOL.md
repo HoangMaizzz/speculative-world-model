@@ -1,3 +1,15 @@
+# Offline verification recovery and checkpoint import
+
+The target remains fixed FP16/SDPA with unchanged18/10GPU layer placement and numerical flags. Saved v4 references were generated from original prompt prefill followed by one-token cached forwards. Re-prefilling the whole corrected prefix can change near-tied FP16 winners, so fallback replay MUST start from the original prompt, not the current long prefix. Each committed token is checked against the model's next argmax before feeding it. After that, each proposal row is scored with the candidate's own teacher-forced history; all selected logits/probabilities are actual model outputs.
+
+The normal parallel verifier is retained only when first rejection and correction agree with the independent saved reference. A disagreement triggers fresh canonical model replay. Its prefix checks and final consistency remain hard requirements; no approximate acceptance, reference-logit substitution, ignored events or precision fallback. Report each row's verification_mode, raw parallel discrepancy, replay scheduling/forward count and BOTH attempt costs. The total includes canonical prefix reconstruction. Stage compute still excludes Accelerate dispatch copies; raw wall remains separate. The fallback trigger is reference-assisted and valid only for this OFFLINE diagnostic, not a deployable online verifier. Do not infer end-to-end speedup or present the new policy as unchanged online SD.
+
+Legacy migration accepts only the audited original v4 commit/source digest, identical experiment config/assets/tokenizer/target precision and compatible torch/transformers/accelerate/CUDA/GPU map flags; only completed-reference checkpoints with no Test2 records. Recompute and check imported Test1 metrics and first-rejection consistency. Preserve imported records/timing exactly with parent-identity provenance; put the archived failure under prior_failure, replay it before further drafting, and preserve its new model evidence. Input files are read-only; write a new output database atomically. Same-runtime unpacked resume keeps the complete existing identity. Unit subprocesses must not inherit the real migration-root environment variable.
+
+Initial smoke/preflight does not prove every FP16 context identical; the known long-context case is now explicitly tested in the user's new run. Local tiny/random/shape-sensitive tests do not establish pretrained GPU success. If canonical replay fails, preserve diagnostics and stop.
+
+---
+
 # Protocol v4: two cohorts; crossed redrafters and future-anchor controls
 
 ## Models, precision and geometry

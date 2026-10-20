@@ -26,16 +26,23 @@ def configuration(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Offline suffix diagnostics; no online speedup claims")
-    parser.add_argument("command", choices=["prepare", "preflight", "run", "analyze", "pack", "restore"])
+    parser.add_argument("command", choices=["prepare", "preflight", "run", "analyze", "pack", "restore", "import-checkpoint"])
     parser.add_argument("--config", default=str(ROOT / "configs/math_gsm8k.json"))
     parser.add_argument("--assets", default="assets/pilot")
     parser.add_argument("--output", default="outputs/pilot")
     parser.add_argument("--smoke", action="store_true", help="Separate 5+5 smoke identity; use separate output/assets")
     parser.add_argument("--stage", choices=["all", "references", "test1", "test2"], default="all")
     parser.add_argument("--archive")
+    parser.add_argument("--checkpoint-root")
+    parser.add_argument("--revision")
     args = parser.parse_args()
     config = configuration(args)
-    if args.command == "prepare":
+    if args.command == "import-checkpoint":
+        from .migration import import_checkpoint
+        if not args.checkpoint_root or not args.revision:
+            parser.error("import-checkpoint requires --checkpoint-root and --revision")
+        import_checkpoint(args.checkpoint_root, args.output, config, args.revision)
+    elif args.command == "prepare":
         from .assets import prepare
         prepare(config, args.assets)
     elif args.command == "restore":
