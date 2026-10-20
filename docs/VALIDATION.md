@@ -6,6 +6,8 @@ Protocol v3 changes have passed68 local tests with no skips, including tiny rand
 
 CUDA placement/stage-event checks remain mocked locally. Notebook entry cells are compiled/executed with mocked network/GPU in separate empty namespaces. No pretrained GPU is available on this host. New GPU preflight explicitly adds constrained AR forced-KV/full-prefix agreement and causal future-anchor invariance. Every unique Test2 candidate is reverified and checked against the target reference; a mismatch stops the run. Only a NEW user Kaggle smoke can establish pretrained v3 correctness and actual runtime/VRAM. No complete100+100 result or online end-to-end speedup is claimed.
 
+Runtime v3 is pinned to c78cd1ba7da5f52b078a7537460e08f949746c39; unchanged launcher remains274762b1cb9e5d8058bced1d7672152748c0a9df / SHA2568797900ba4561981d8fe6968f797706a1e963e9caee6ea5ddad293f6f79c1ac8. Retrospective analysis of the original user ZIP now distinguishes7 pairs without bounded correct-KEEP gain from5 with no observed gain: two additional non-oracle gains (+8 and+5) are no longer mislabeled. This reanalysis does not create crossed-redrafter or new conditioning evidence.
+
 The remaining notes below describe historical iterations, not the current validation state.
 
 ---
