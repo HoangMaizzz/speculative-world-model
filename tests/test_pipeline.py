@@ -34,7 +34,8 @@ class FakeDrafter:
 class FakeVerifier:
     def score(self, prefix, proposal, top_k=8):
         n = len(proposal)
-        return {"top1": [10+len(prefix)-2+i for i in range(n)], "probability": [.6]*n}
+        return {"top1": [10+len(prefix)-2+i for i in range(n)], "probability": [.6]*n,
+                "latency_ms": 1., "wall_latency_ms": 2., "input_tokens": len(prefix)+n}
 
 
 class PipelineTests(unittest.TestCase):
@@ -70,14 +71,32 @@ class PipelineTests(unittest.TestCase):
                  patch("suffix_lab.runtime.release"), patch("suffix_lab.runtime.memory", return_value=[]):
                 runner.test1()
                 self.assertEqual(len(runner.store.rows("test1")), 4)
+                with patch.object(runner, "checkpoint", side_effect=TimeoutError("fixture soft budget")):
+                    with self.assertRaisesRegex(TimeoutError, "soft budget"):
+                        runner.test2()
+                frozen = runner.store.rows("repair_plan")
+                saved_arm = runner.store.rows("test2")[0]
+                self.assertFalse(runner.store.rows("event_complete"))
                 runner.test2()
-                self.assertEqual(loaded[:3], [DLLM, AR, DLLM])
+                self.assertEqual(loaded, [DLLM, AR, DLLM, DLLM, AR])
+                self.assertEqual(frozen, runner.store.rows("repair_plan"))
+                self.assertEqual(saved_arm, runner.store.get("test2", saved_arm["id"]))
+                self.assertEqual(len(runner.store.rows("pair_complete")), 4)
                 self.assertTrue(all(ref() is None for ref in weak_models))
                 old = runner.store.rows("test2")
                 self.assertEqual(len(runner.store.rows("event_complete")), 2)
                 for row in old:
                     self.assertEqual(row["horizon"], 32-row["first_rejection"])
                     self.assertEqual(row["stats"]["unmask_steps"], row["horizon"]-len(row["keep"]))
+                from collections import defaultdict
+                matrix = defaultdict(dict)
+                for row in old:
+                    matrix[row["event_id"], row["method"]][row["redrafter"]] = row
+                for pair in matrix.values():
+                    self.assertEqual(set(pair), {"dllm_top1", "ar_greedy"})
+                    self.assertEqual(pair["dllm_top1"]["anchors"], pair["ar_greedy"]["anchors"])
+                    self.assertEqual(pair["dllm_top1"]["context_length"], pair["ar_greedy"]["context_length"])
+                self.assertTrue(all(x["probe_gain"] == 0 for x in old if x["redrafter"] == "ar_greedy" and x["arm_family"] == "conditioning"))
                 runner.test1()
                 runner.test2()
                 self.assertEqual(old, runner.store.rows("test2"))

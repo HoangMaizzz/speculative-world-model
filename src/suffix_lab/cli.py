@@ -7,12 +7,16 @@ from .assets import ROOT
 def configuration(args):
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
     if args.smoke:
-        config.update(prompts_per_dataset=5, prefixes_per_prompt=2, reference_tokens=128,
+        config.update(prompts_per_dataset=5, prefixes_per_prompt=3, reference_tokens=256,
                       test2_events=8, oracle_subset_limit=4, bootstrap_samples=200)
     if not 0 < config["prefixes_per_prompt"] <= 5 or config["proposal_length"] != 32:
         raise ValueError("This protocol requires proposal32 and 1–5 prefixes")
     if (config["physical_block_size"], config["subblock_size"]) != (32, 8):
         raise ValueError("This protocol requires physical32 / active8")
+    if set(config["redrafters"]) != {"dllm_top1", "ar_greedy"} or len(config["redrafters"]) != 2:
+        raise ValueError("Both redrafters must run exactly once")
+    if config["conditioning_anchor_count"] < 1 or config["conditioning_probe_tokens"] < 1:
+        raise ValueError("Conditioning needs positive anchor count and probe horizon")
     return config
 
 

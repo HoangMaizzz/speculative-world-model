@@ -1,3 +1,15 @@
+# Current validation: protocol v3 (20 October 2026)
+
+The user's previous GPU ZIP (SHA256 a61aacddb839137fa7fad1afb5bd9224f6315b524490529c24f1f73c38849b05) passed the PRIOR FP16 protocol: 2 Tesla T4,10 prompts,20 states,40 proposals,8 Test2events,201 arms,10 plots,342.996s including prepare/preflight, excluding launcher setup. Exact two-GPU map, tokenizer, target cached/parallel/causal-tail checks, dLLM cache/KEEP geometry and AR passed. A separate3397-check audit verified that artifact. This is user-run evidence, not an agent GPU execution, and it does NOT validate new constrained AR, crossed repairs, controls, or pilot speed/quality. The old pipeline was cold replay, not online rollback.
+
+Protocol v3 changes have passed68 local tests with no skips, including tiny random official Qwen2 constrained causal KV versus independent full-prefix replay, all-KEEP forward counts, forced-token confidence, no future-anchor leakage, pinned official random Fast-dLLM cache/KEEP checks, matched-content controls, balanced sampling, early/middle/late offsets, old-token versus injected-anchor accounting, and the previously misclassified guided-gain case. The synthetic teacher pipeline covers all four source/redrafter combinations, identical plans, real control flow through verifier scoring, prompt-cluster analysis/10 plots, and interruption after a persisted arm followed by exact-plan resume. Model weak references are gone before the next drafter loads.
+
+CUDA placement/stage-event checks remain mocked locally. Notebook entry cells are compiled/executed with mocked network/GPU in separate empty namespaces. No pretrained GPU is available on this host. New GPU preflight explicitly adds constrained AR forced-KV/full-prefix agreement and causal future-anchor invariance. Every unique Test2 candidate is reverified and checked against the target reference; a mismatch stops the run. Only a NEW user Kaggle smoke can establish pretrained v3 correctness and actual runtime/VRAM. No complete100+100 result or online end-to-end speedup is claimed.
+
+The remaining notes below describe historical iterations, not the current validation state.
+
+---
+
 # Validation record
 
 Development host: Windows, Python3.12.14, PyTorch2.9.0+cpu, Transformers4.53.3, einops0.8.1. Analysis checked with pandas2.2.3, matplotlib3.10.1, scikit-learn1.6.1 (local transitive NumPy2.5.4 / HF Hub0.36.2; Kaggle pins NumPy2.1.3 / HF Hub0.35.3). No pretrained model weights loaded locally.

@@ -48,6 +48,32 @@ class TinyModelTests(unittest.TestCase):
                 expected.append(int(model(ids, use_cache=False).logits[0, -1].argmax()))
         self.assertEqual(expected, a.tokens)
 
+    def test_constrained_ar_forces_into_kv_and_preserves_causal_negative_control(self):
+        import torch
+        from transformers import Qwen2Config, Qwen2ForCausalLM
+        from suffix_lab.runtime import ARSession, constrained_ar_consistency
+        config = Qwen2Config(vocab_size=64, hidden_size=32, intermediate_size=64,
+            num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+            max_position_embeddings=512, eos_token_id=63)
+        config._attn_implementation = "sdpa"
+        session = ARSession(Qwen2ForCausalLM(config).eval())
+        self.assertTrue(constrained_ar_consistency(session, [1, 2, 3, 4, 5], 12)["passed"])
+        anchors = {0: 17, 3: 23, 7: 11}
+        result = session.draft([1, 2, 3], 8, anchors=anchors)
+        expected = []
+        with torch.inference_mode():
+            for i in range(8):
+                logits = session.model(torch.tensor([[1, 2, 3]+expected]), use_cache=False).logits[0, -1].float()
+                token = anchors[i] if i in anchors else int(logits.argmax())
+                expected.append(token)
+                self.assertAlmostEqual(result.confidence[i], float(logits.softmax(-1)[token]), places=6)
+        self.assertEqual(result.tokens, expected)
+        self.assertEqual(result.stats["total_forwards"], 8)
+        self.assertEqual(result.stats["unmask_steps"], 5)
+        self.assertEqual([result.order[i] for i in anchors], [None]*3)
+        with self.assertRaisesRegex(ValueError, "fixed horizon"):
+            session.draft([1, 2], 8, {63}, anchors=anchors)
+
     def test_tied_logits_use_same_greedy_token_in_draft_and_score(self):
         import torch
         from suffix_lab.runtime import ARSession, target_consistency

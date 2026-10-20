@@ -114,43 +114,60 @@ class ARSession:
                 model._suffix_stage_timer = StageTimer(model)
             self.timer = model._suffix_stage_timer
 
-    def draft(self, prefix, length, stop_eos=None):
+    def draft(self, prefix, length, stop_eos=None, *, anchors=None):
         if self.timer is None:
-            result = self._draft(prefix, length, stop_eos)
+            result = self._draft(prefix, length, stop_eos, anchors)
             result.stats["latency_policy"] = "single_device_synchronized_wall_no_peer_transfer"
             return result
         with self.timer.measure():
-            result = self._draft(prefix, length, stop_eos)
+            result = self._draft(prefix, length, stop_eos, anchors)
         if length:
             result.stats.update(self.timer.report(result.stats["latency_ms"]))
         return result
 
-    def _draft(self, prefix, length, stop_eos=None):
+    def _draft(self, prefix, length, stop_eos=None, anchors=None):
         import torch
+        anchors = anchors or {}
+        if anchors and stop_eos is not None:
+            raise ValueError("Constrained AR requires fixed horizon without EOS stopping")
+        if any(not 0 <= i < length or token < 0 for i, token in anchors.items()):
+            raise ValueError("Invalid AR anchor")
         sync_model(self.model)
         begin = time.perf_counter()
-        result, confidence = [], []
+        result, confidence, order = [], [], []
+        prefill_ms, mutable_steps = 0., 0
         cache = None
         ids = torch.tensor([prefix], device=self.device)
         input_tokens = 0
         with torch.inference_mode():
-            for _ in range(length):
+            for step in range(length):
                 input_tokens += ids.shape[1]
+                prefill_start = time.perf_counter() if step == 0 else None
                 out = self.model(ids, past_key_values=cache, use_cache=True, logits_to_keep=1)
+                if step == 0:
+                    sync_model(self.model)
+                    prefill_ms = (time.perf_counter()-prefill_start)*1000
                 cache = out.past_key_values
                 logits = out.logits[0, -1].float()
-                token = logits.argmax(-1)  # Lowest token ID wins exact ties.
+                token = anchors[step] if step in anchors else int(logits.argmax(-1))
                 prob = logits.softmax(-1)[token]
                 token = int(token)
                 result.append(token)
                 confidence.append(float(prob))
+                order.append(None if step in anchors else mutable_steps)
+                mutable_steps += step not in anchors
                 if stop_eos is not None and token in stop_eos:
                     break
                 ids = torch.tensor([[token]], device=self.device)
         sync_model(self.model)
-        return Draft(result, confidence, list(range(len(result))), stats={
+        latency = (time.perf_counter()-begin)*1000
+        return Draft(result, confidence, order, stats={
             "total_forwards": len(result), "input_tokens": input_tokens,
-            "latency_ms": (time.perf_counter()-begin)*1000})
+            "unmask_steps": mutable_steps, "hard_keep_count": len(anchors),
+            "forced_positions": len(anchors), "prefill_forwards": int(bool(result)),
+            "decode_forwards": max(0, len(result)-1), "prefill_ms": prefill_ms,
+            "mutable_latency_ms": max(0., latency-prefill_ms), "latency_ms": latency,
+            "mutable_time_definition": "AR wall after causal prefix prefill; forced tokens still require forward processing"})
 
     def score(self, prefix, proposal, top_k=8):
         """Old causal feedback on draft contexts; never a post-correction acceptance."""
@@ -330,6 +347,28 @@ def target_consistency(session, prefix, length=12):
             "parallel_tokens": parallel, "first_mismatches": mismatches}
 
 
+def constrained_ar_consistency(session, prefix, length=8):
+    """Check actual forced KV propagation against independent full-prefix replay."""
+    import torch
+    fresh = session.draft(prefix, length)
+    anchors = {length//2: prefix[-1], length-1: prefix[0]}
+    actual = session.draft(prefix, length, anchors=anchors)
+    expected = []
+    with torch.inference_mode():
+        for i in range(length):
+            ids = torch.tensor([prefix+expected], device=session.device)
+            logits = session.model(ids, use_cache=False, logits_to_keep=1).logits[0, -1]
+            expected.append(anchors[i] if i in anchors else int(logits.argmax()))
+    all_keep = session.draft(prefix, length, anchors=dict(enumerate(fresh.tokens)))
+    report = {"forced_full_prefix_equal": actual.tokens == expected,
+        "future_anchor_causal_equal": actual.tokens[:length//2] == fresh.tokens[:length//2],
+        "all_keep_equal": all_keep.tokens == fresh.tokens,
+        "all_keep_forwards": all_keep.stats["total_forwards"],
+        "forced_tokens": [[i, t] for i, t in sorted(anchors.items())]}
+    report["passed"] = all(report[k] for k in ("forced_full_prefix_equal", "future_anchor_causal_equal", "all_keep_equal")) and report["all_keep_forwards"] == length
+    return report
+
+
 class TargetConsistencyError(AssertionError):
     def __init__(self, attempts):
         self.attempts = attempts
@@ -404,7 +443,8 @@ def preflight(manifest, config, output):
     release(None)
     ar = load_model(manifest["paths"][AR], "cuda:1")
     ar_audit = target_consistency(ARSession(ar), prefix, 8)
-    if not ar_audit["passed"]:
+    constrained_ar_audit = constrained_ar_consistency(ARSession(ar), prefix, 8)
+    if not ar_audit["passed"] or not constrained_ar_audit["passed"]:
         raise AssertionError("FP16 AR drafter preflight consistency failed")
     ar_memory = memory()
     del ar, target
@@ -415,7 +455,7 @@ def preflight(manifest, config, output):
               "target_attempts": attempts,
               "target_device_map": target_device_map,
               "target_latency_policy": "cuda_stage_events_excluding_dispatch_copies",
-              "ar_audit": ar_audit, "ar_memory": ar_memory,
+              "ar_audit": ar_audit, "constrained_ar_audit": constrained_ar_audit, "ar_memory": ar_memory,
               "tokenizer": evidence, "checks": checks, "target_memory": target_memory,
               "dllm_memory": dllm_memory, "torch": torch.__version__}
     report["source_digest"] = source_digest()

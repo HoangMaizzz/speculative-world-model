@@ -1,5 +1,5 @@
 """Offline paired-prefix diagnostics and independent fixed-horizon repairs."""
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict
 import importlib.metadata
 import json
@@ -10,53 +10,81 @@ import subprocess
 import time
 import zipfile
 from .assets import ROOT, TARGET, AR, DLLM, source_digest
-from .metrics import suffix_metrics, redraft_metrics, prefix_length
-from .selection import Observation, select_keep, oracle_masks
+from .metrics import suffix_metrics, prefix_length
+from .selection import select_keep
 from .store import Store, atomic_json, digest
 
 
 def offsets(prompt_length, reference_length, horizon=32, count=5):
-    """Shared beginning/middle states, including a valid absolute aligned state."""
-    last = min(reference_length-horizon-1, reference_length*2//3)
+    """Cover the eligible reference window, preserving both endpoints."""
+    last = reference_length-horizon-1
     if last < 0:
         return []
-    choices = [0]
-    aligned = (-prompt_length) % 32
-    if aligned <= last:
-        choices.append(aligned)
-    if count > 1:
-        choices.extend(round(last*i/(count-1)) for i in range(1, count))
+    choices = [0] if count == 1 else [round(last*i/(count-1)) for i in range(count)]
+    aligned = list(range((-prompt_length) % 32, last+1, 32))
+    if count >= 3 and aligned:
+        center = min(aligned, key=lambda x: (abs(x-last/2), x))
+        index = min(range(1, len(choices)-1), key=lambda i: abs(choices[i]-center))
+        choices[index] = center
     choices.extend(range(last+1))
     unique = list(dict.fromkeys(choices))[:count]
     return sorted(unique)
 
 
+def progress_bin(offset, reference_length):
+    progress = offset/max(1, reference_length)
+    return "early" if progress < 1/3 else ("middle" if progress < 2/3 else "late")
+
+
 def stratified_events(records, count, seed=42, sources=("dllm_top1", "ar_greedy")):
-    """Frozen sample before evaluating any repair; dLLM gets 2:1 priority."""
+    """Balance source, then benchmark, rejection bin and reference progress."""
     strata = defaultdict(list)
     for row in records:
         r = row["metrics"]["first_rejection"]
         if 1 <= r < len(row["draft"]["tokens"]) and row["source"] in sources:
-            strata[(row["source"], row["dataset"], (r-1)//8)].append(row["id"])
+            strata[(row["source"], row["dataset"], (r-1)//8, row.get("progress_bin", "unknown"))].append(row["id"])
     rng = random.Random(seed)
     for key in sorted(strata):
         strata[key].sort()
         rng.shuffle(strata[key])
     picked = []
     usage = defaultdict(int)
-    cycle = ["dllm_top1", "dllm_top1", "ar_greedy"]
+    cycle = list(sources)
     while len(picked) < count and any(strata.values()):
         for source in cycle:
             keys = [k for k in sorted(strata) if k[0] == source and strata[k]]
             if not keys:
                 continue
-            # Round robin across benchmark/rejection bins, preserving source priority.
-            key = min(keys, key=lambda k: (usage[k], k))
+            key = min(keys, key=lambda k: (usage[k[:2]], usage[k[:3]], usage[k], k))
             picked.append(strata[key].pop())
+            usage[key[:2]] += 1
+            usage[key[:3]] += 1
             usage[key] += 1
             if len(picked) >= count:
                 break
     return picked
+
+
+def sampling_coverage(records, selected, config):
+    available, chosen = Counter(), Counter()
+    for row in records:
+        r = row["metrics"]["first_rejection"]
+        if 1 <= r < len(row["draft"]["tokens"]) and row["source"] in config["test2_sources"]:
+            key = (row["source"], row["dataset"], (r-1)//8, row.get("progress_bin", "unknown"))
+            available[key] += 1
+            chosen[key] += row["id"] in selected
+    rows = []
+    for source in config["test2_sources"]:
+        for dataset in config["datasets"]:
+            for rejection in range(4):
+                for progress in ("early", "middle", "late"):
+                    key = (source, dataset, rejection, progress)
+                    rows.append({"source": source, "dataset": dataset, "rejection_bin": rejection,
+                                 "progress_bin": progress, "available": available[key], "selected": chosen[key],
+                                 "empty_stratum": available[key] == 0})
+    return {"requested": config["test2_events"], "eligible": sum(available.values()),
+            "selected": len(selected), "sampling": "equal-source hierarchical round robin; redistribute exhausted strata",
+            "strata": rows}
 
 
 def nonoracle_plans(obs, config, seed):
@@ -83,7 +111,7 @@ def pack(output):
     if db.exists():
         store = Store(db)
         store.backup(output / "checkpoint.sqlite")
-        for kind in ("reference", "test1", "test2"):
+        for kind in ("reference", "test1", "test2", "repair_plan", "oracle_search", "pair_complete"):
             store.export(kind, output / (kind+".jsonl"))
         store.close()
     path = output / "suffix_checkpoint.zip"
@@ -155,7 +183,7 @@ class Runner:
                         target_device_map={name: str(device) for name, device in self.target.hf_device_map.items()},
                         target_latency_policy="cuda_stage_events_excluding_dispatch_copies",
                         allow_fp16_reduced_precision_reduction=torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction)
-        identity = {"protocol": "suffix-top1-v2-fp16-stage-timing", "config": config,
+        identity = {"protocol": "suffix-top1-v3-cross-redrafter-conditioning", "config": config,
                     "source_digest": source_digest(),
                     "asset_digest": manifest["content_digest"], "target_precision": precision,
                     "tokenizer": token_evidence, "environment": self.env}
@@ -228,6 +256,9 @@ class Runner:
                         row = {"id": key, "state_id": state_id, "prompt_id": ref["id"],
                                "dataset": ref["dataset"], "source": source, "offset": offset,
                                "context_length": len(prefix), "physical_phase": len(prefix) % 32,
+                               "reference_length": len(ref["tokens"]),
+                               "reference_progress": offset/max(1, len(ref["tokens"])),
+                               "progress_bin": progress_bin(offset, len(ref["tokens"])),
                                "draft": asdict(draft), "feedback": feedback, "reference": gold, "metrics": m}
                         eos_id = self.target.generation_config.eos_token_id if hasattr(self, "target") else []
                         eos_ids = eos_id if isinstance(eos_id, list) else [eos_id]
@@ -242,84 +273,8 @@ class Runner:
         self.store.put("meta", "test1_complete", True)
 
     def test2(self):
-        from .runtime import DLLMDrafter, load_model, release
-        c = self.config
-        if not self.store.get("meta", "test1_complete"):
-            raise ValueError("Finish Test 1 before freezing the Test 2 sample")
-        selected = self.store.get("meta", "test2_sample")
-        if selected is None:
-            selected = stratified_events(self.store.rows("test1"), c["test2_events"], c["seed"], c["test2_sources"])
-            self.store.put("meta", "test2_sample", selected)
-        model = load_model(self.manifest["paths"][DLLM], "cuda:1")
-        drafter = DLLMDrafter(model, c)
-        refs = self.store.rows("reference")
-        if refs:
-            warmup = drafter.draft(refs[0]["prompt_ids"], 2)
-            self.store.put("warmup", "test2", warmup.stats)
-        try:
-            for event_id in selected:
-                if self.store.get("event_complete", event_id):
-                    continue
-                row = self.store.get("test1", event_id)
-                ref = self.store.get("reference", row["prompt_id"])
-                r = row["metrics"]["first_rejection"]  # 1-based, correction at r-1
-                prefix = ref["prompt_ids"] + ref["tokens"][:row["offset"]+r]
-                old, gold = row["draft"]["tokens"][r:], row["reference"][r:]
-                obs = Observation(tuple(old), tuple(row["draft"]["confidence"][r:]),
-                                  tuple(row["feedback"]["probability"][r:]), tuple(row["feedback"]["top1"][r:]))
-                seed = int(digest([c["seed"], event_id])[:8], 16)
-                start = time.perf_counter()
-                plans = nonoracle_plans(obs, c, seed)
-                selector_ms = (time.perf_counter()-start)*1000
-                cached_masks = {}
-
-                def arm(method, keep):
-                    key = event_id+"|"+method
-                    existing = self.store.get("test2", key)
-                    mask_key = digest(keep)
-                    if existing:
-                        cached_masks[mask_key] = existing
-                        return existing
-                    # Independent cold replay: no suffix KV or preceding arm's mutable state.
-                    previous = cached_masks.get(mask_key)
-                    result = drafter.draft(prefix, len(old), {i: old[i] for i in keep}) if previous is None else None
-                    metrics = redraft_metrics(result.tokens if result else previous["tokens"], gold, old, keep)
-                    payload = {"id": key, "event_id": event_id, "prompt_id": row["prompt_id"],
-                               "dataset": row["dataset"], "source": row["source"], "method": method,
-                               "oracle": method.startswith("oracle"), "first_rejection": r, "horizon": len(old),
-                               "context_length": len(prefix), "physical_phase": len(prefix) % 32,
-                               "keep": keep, "keep_ratio": len(keep)/len(old),
-                               "tokens": result.tokens if result else previous["tokens"],
-                               "stats": result.stats if result else previous["stats"], "metrics": metrics,
-                               "mask_reused_from": previous["id"] if previous else None,
-                               "selector_ms_event": selector_ms, "latency_policy": "independent cold prefix replay"}
-                    self.store.put("test2", key, payload)
-                    cached_masks[mask_key] = payload
-                    self.checkpoint()
-                    return payload
-
-                fresh = None
-                for method, keep in plans:
-                    value = arm(method, keep)
-                    if method == "fresh_L":
-                        fresh = value
-                candidates = oracle_masks(old, gold, c["oracle_subset_limit"], seed)
-                a = arm("oracle_A", candidates[0])
-                tried = [a]
-                if a["metrics"]["accepted_prefix"] <= fresh["metrics"]["accepted_prefix"]:
-                    for i, keep in enumerate(candidates[1:]):
-                        tried.append(arm(f"oracle_B#{i}", keep))
-                best = max(tried, key=lambda x: (x["metrics"]["accepted_prefix"], x["metrics"]["full_block_accuracy"]))
-                self.store.put("oracle_search", event_id, {"event_id": event_id, "candidates": len(tried),
-                    "best_id": best["id"], "best_accepted_prefix": best["metrics"]["accepted_prefix"],
-                    "oracle_A_id": a["id"], "acquisition_cost_excluded": True, "bounded_not_global": True})
-                self.store.put("event_complete", event_id, True)
-                print("test2", event_id, "fresh=", fresh["metrics"]["accepted_prefix"],
-                      "oracle_A=", a["metrics"]["accepted_prefix"], flush=True)
-            self.store.put("meta", "test2_complete", True)
-        finally:
-            del drafter, model
-            release(None)
+        from .repair import run_repairs
+        return run_repairs(self)
 
     def run(self):
         status = "complete"

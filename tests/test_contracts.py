@@ -201,18 +201,19 @@ class SamplingTests(unittest.TestCase):
         result = offsets(45, 256, 32, 5)
         self.assertEqual(len(result), 5)
         self.assertIn(0, result)
-        self.assertIn(19, result)
+        self.assertTrue(any((45+x)%32 == 0 for x in result))
+        self.assertIn(223, result)
         self.assertTrue(all(x+33 <= 256 for x in result))
         self.assertEqual(offsets(30, 32), [])
 
-    def test_stratified_sample_frozen_unique_and_dllm_priority(self):
+    def test_stratified_sample_frozen_unique_and_source_balance(self):
         rows = [{"id": f"{s}:{d}:{i}", "source": s, "dataset": d,
                  "metrics": {"first_rejection": i+1}, "draft": {"tokens": [1]*32}}
                 for s in ("dllm_top1", "ar_greedy") for d in ("math500", "gsm8k") for i in range(32)]
         result = stratified_events(rows, 30)
         self.assertEqual(result, stratified_events(list(reversed(rows)), 30))
         self.assertEqual(len(set(result)), 30)
-        self.assertEqual(sum(x.startswith("dllm") for x in result), 20)
+        self.assertEqual(sum(x.startswith("dllm") for x in result), 15)
         self.assertTrue(all(not x.endswith(":31") for x in result))
 
 

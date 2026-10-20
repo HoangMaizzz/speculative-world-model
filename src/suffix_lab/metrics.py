@@ -45,21 +45,49 @@ def suffix_metrics(proposal, reference, old_top1=None):
             **{f"suffix_at_least_{j}": sum(tail) >= j for j in (1, 2, 4, 8)}}
 
 
-def redraft_metrics(proposal, reference, old, keep):
+def redraft_metrics(proposal, reference, old, keep, anchor_values=None):
     if len(proposal) != len(old) or len(reference) < len(proposal):
         raise ValueError("Mismatched redraft horizon")
-    if any(proposal[i] != old[i] for i in keep):
+    anchors = {i: old[i] for i in keep} if anchor_values is None else anchor_values
+    if set(anchors) != set(keep):
+        raise ValueError("Anchor positions differ from KEEP positions")
+    if any(proposal[i] != anchors[i] for i in keep):
         raise AssertionError("Hard KEEP changed")
     matches = [x == y for x, y in zip(proposal, reference)]
     mutable = [i for i in range(len(proposal)) if i not in keep]
     def rate(indices):
         return sum(matches[i] for i in indices)/len(indices) if indices else None
-    wrong_keep = [i for i in sorted(keep) if old[i] != reference[i]]
+    retained = [i for i in keep if anchors[i] == old[i]]
+    wrong_keep = [i for i in sorted(keep) if anchors[i] != reference[i]]
     return {"accepted_prefix": prefix_length(proposal, reference),
             "full_block_accuracy": rate(list(range(len(proposal)))),
-            "fully_correct": all(matches), "retained_precision": rate(keep),
-            "remasked_accuracy": rate(mutable), "retained_count": len(keep),
+            "fully_correct": all(matches), "retained_precision": rate(retained),
+            "anchor_precision": rate(keep), "anchor_count": len(keep),
+            "anchor_correct_count": sum(anchors[i] == reference[i] for i in keep),
+            "remasked_accuracy": rate(mutable), "retained_count": len(retained),
             "remasked_count": len(mutable), "false_keep_count": len(wrong_keep),
             "first_false_keep": wrong_keep[0] if wrong_keep else None,
-            "recovered_old_tokens_in_prefix": sum(i in keep for i in range(prefix_length(proposal, reference)))}
+            "recovered_old_tokens_in_prefix": sum(i in retained for i in range(prefix_length(proposal, reference)))}
+
+
+def event_gains(arms):
+    """Separate finite correct-KEEP search from guided/conditioning observations."""
+    fresh = next(x for x in arms if x["method"] == "fresh_L")
+    baseline = fresh["metrics"]["accepted_prefix"]
+    family = lambda x: x.get("arm_family", "oracle" if x["oracle"] else "nonoracle")
+    oracle = [x for x in arms if family(x) == "oracle"]
+    nonoracle = [x for x in arms if family(x) == "nonoracle"]
+    guided = [x for x in nonoracle if x["method"].startswith(("verifier_confidence", "drafter_confidence", "old_agreement"))]
+    wrong = [x for x in arms if x["metrics"].get("anchor_count", x["metrics"].get("retained_count", 0)) > 0
+             and x["metrics"]["false_keep_count"] == x["metrics"].get("anchor_count", x["metrics"].get("retained_count", 0))]
+    def gain(rows):
+        return max((x["metrics"]["accepted_prefix"]-baseline for x in rows), default=0)
+    a = next((x for x in oracle if x["method"] == "oracle_A"), None)
+    bounded, observed, selected = gain(oracle), gain(arms), gain(nonoracle)
+    return {"oracle_A_gain": a["metrics"]["accepted_prefix"]-baseline if a else None,
+            "bounded_oracle_gain": bounded, "best_nonoracle_gain": selected,
+            "best_guided_gain": gain(guided), "wrong_anchor_gain": gain(wrong),
+            "conditioning_gain": gain([x for x in arms if family(x) == "conditioning"]),
+            "best_observed_gain": observed, "oracle_selector_gap": bounded > 0 and selected <= 0,
+            "no_bounded_correct_keep_gain": bounded <= 0, "no_observed_gain": observed <= 0}
 

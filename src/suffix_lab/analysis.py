@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import statistics
 from .store import Store, atomic_json
+from .metrics import event_gains
 
 
 def clustered_summary(values, prompts, samples=2000, seed=42):
@@ -52,22 +53,45 @@ def analyze(output, bootstrap_samples=2000):
         rows1.append({k: row[k] for k in ("id", "state_id", "prompt_id", "dataset", "source", "physical_phase", "offset")} |
                      {k: v for k, v in m.items() if not isinstance(v, list)} |
                      {"draft_latency_ms": row["draft"]["stats"]["latency_ms"],
-                      "draft_forwards": row["draft"]["stats"]["total_forwards"]})
+                      "draft_forwards": row["draft"]["stats"]["total_forwards"],
+                      "verify_compute_ms": row["feedback"].get("latency_ms"),
+                      "verify_wall_ms": row["feedback"].get("wall_latency_ms"),
+                      "progress_bin": row.get("progress_bin", "unknown") })
         for i in range(m["first_rejection"], len(row["draft"]["tokens"])):
             token_rows.append({"id": row["id"], "prompt_id": row["prompt_id"], "dataset": row["dataset"],
                 "source": row["source"], "distance": i-m["first_rejection"]+1,
                 "correct": int(m["reference_matches"][i]), "old_agrees": int(m["old_matches"][i]),
                 "verifier_confidence": row["feedback"]["probability"][i],
                 "drafter_confidence": row["draft"]["confidence"][i], "unmask_order": row["draft"]["order"][i]})
-    fresh = {r["event_id"]: r for r in two if r["method"] == "fresh_L"}
     for row in two:
-        if row["event_id"] not in fresh:
+        row.setdefault("redrafter", "dllm_top1")  # Read legacy checkpoints without mixing baselines.
+        row.setdefault("arm_family", "oracle" if row["oracle"] else "nonoracle")
+    fresh = {(r["event_id"], r["redrafter"]): r for r in two if r["method"] == "fresh_L"}
+    def compute_work(row):
+        verify = row.get("verification", {}).get("latency_ms")
+        return row["stats"]["latency_ms"]+verify if verify is not None else None
+    def difference(a, b):
+        return a-b if a is not None and b is not None else None
+    for row in two:
+        pair = (row["event_id"], row["redrafter"])
+        if pair not in fresh:
             continue
-        baseline = fresh[row["event_id"]]
+        baseline = fresh[pair]
         gain = row["metrics"]["accepted_prefix"] - baseline["metrics"]["accepted_prefix"]
         rows2.append({k: row[k] for k in ("id", "event_id", "prompt_id", "dataset", "source", "method", "oracle",
-                        "first_rejection", "horizon", "physical_phase", "keep_ratio")} |
-                     row["metrics"] | {"gain": gain, "win": int(gain > 0), "tie": int(gain == 0), "loss": int(gain < 0),
+                        "first_rejection", "horizon", "physical_phase", "keep_ratio", "redrafter", "arm_family")} |
+                     row["metrics"] | {"gain": gain,
+                        "progress_bin": row.get("progress_bin", "unknown"),
+                        "probe_gain": row.get("probe_gain"),
+                        "probe_accepted_prefix": row.get("probe_accepted_prefix"),
+                        "t_draft_wall_ms": row["stats"]["latency_ms"],
+                        "t_verify_compute_ms": row.get("verification", {}).get("latency_ms"),
+                        "t_verify_wall_ms": row.get("verification", {}).get("wall_latency_ms"),
+                        "t_draft_plus_verify_compute_ms": compute_work(row),
+                        "draft_plus_verify_compute_delta_ms": difference(compute_work(row), compute_work(baseline)),
+                        "t_selector_ms_event": row.get("selector_ms_event"),
+                        "t_wall_ms": row.get("pipeline_wall_ms"),
+                        "pipeline_wall_delta_ms": difference(row.get("pipeline_wall_ms"), baseline.get("pipeline_wall_ms")), "win": int(gain > 0), "tie": int(gain == 0), "loss": int(gain < 0),
                         "forwards": row["stats"]["total_forwards"], "unmask_forwards": row["stats"]["unmask_steps"],
                         "latency_ms": row["stats"]["latency_ms"],
                         "mutable_latency_ms": row["stats"].get("mutable_latency_ms", 0.),
@@ -90,12 +114,13 @@ def analyze(output, bootstrap_samples=2000):
     summarize(frame1, ["dataset", "source"], ["accepted_prefix", "suffix_match_rate", "suffix_match_count",
         "direct_rejoin_length", "island_count", "max_island_length", "all_accepted",
         "suffix_at_least_1", "suffix_at_least_2", "suffix_at_least_4", "suffix_at_least_8"], "test1")
-    summarize(frame2, ["dataset", "source", "method"], ["accepted_prefix", "full_block_accuracy", "retained_precision",
+    summarize(frame2, ["dataset", "source", "redrafter", "method"], ["accepted_prefix", "full_block_accuracy", "retained_precision",
         "remasked_accuracy", "fully_correct", "gain", "win", "tie", "loss", "forwards", "latency_ms",
         "forward_delta", "latency_delta_ms"], "test2")
-    summarize(frame2, ["dataset", "source", "first_rejection", "horizon", "method"],
+    summarize(frame2, ["dataset", "source", "redrafter", "first_rejection", "horizon", "method"],
         ["accepted_prefix", "gain", "forwards", "latency_ms"], "test2_rejection_strata")
     summarize(frame1, ["physical_phase", "source"], ["suffix_match_rate", "accepted_prefix"], "phase_audit")
+    summarize(frame1, ["dataset", "source", "progress_bin"], ["accepted_prefix", "suffix_match_rate"], "progress_audit")
     paired = []
     by_state = defaultdict(dict)
     for row in rows1:
@@ -129,7 +154,7 @@ def analyze(output, bootstrap_samples=2000):
     atomic_json(destination / "feature_scores.json", feature_scores)
 
     def figure(filename, title, draw, available):
-        height = max(5, .25*frame2.method.nunique()) if filename.startswith("07_") and not frame2.empty else 5
+        height = max(5, .22*frame2.groupby(["source", "redrafter", "method"]).ngroups) if filename.startswith("07_") and not frame2.empty else 5
         fig, ax = plt.subplots(figsize=(10, height))
         if available:
             draw(ax)
@@ -168,14 +193,15 @@ def analyze(output, bootstrap_samples=2000):
     figure("06_verifier_confidence.png", "Old-context draft-token probability vs true suffix correctness",
         confidence_plot, not tokens.empty)
     def bars(ax):
-        means = frame2.groupby("method").accepted_prefix.mean().sort_values()
+        means = frame2.groupby(["source", "redrafter", "method"]).gain.mean().sort_values()
+        means.index = [" / ".join(x) for x in means.index]
         ax.barh(means.index, means.values)
-        ax.set_xlabel("Mean accepted prefix tokens (different horizons; inspect stratified CSV)")
+        ax.set_xlabel("Mean gain vs own event/redrafter fresh-L (inspect stratified CSV)")
         ax.tick_params(axis="y", labelsize=7)
     figure("07_methods.png", "Repair methods; oracle shown as diagnostic only", bars, not frame2.empty)
     def scatter(ax, x):
-        for method, part in frame2.groupby("method"):
-            ax.scatter(part[x].mean(), part.accepted_prefix.mean(), label=method, s=30)
+        for method, part in frame2.groupby(["source", "redrafter", "method"]):
+            ax.scatter(part[x].mean(), part.accepted_prefix.mean(), label="/".join(method), s=30)
         ax.set_xlabel(x + " (cold replay; no online speedup)")
         ax.set_ylabel("Accepted prefix tokens")
         ax.legend(fontsize=5, ncol=2)
@@ -184,49 +210,100 @@ def analyze(output, bootstrap_samples=2000):
     def ratios(ax):
         temp = frame2[~frame2.oracle & frame2.method.str.contains("@")].copy()
         temp["family"] = temp.method.str.split("@").str[0]
-        for family, part in temp.groupby("family"):
+        for family, part in temp.groupby(["source", "redrafter", "family"]):
             means = part.groupby("keep_ratio").gain.mean()
-            ax.plot(means.index, means.values, marker=".", label=family)
+            ax.plot(means.index, means.values, marker=".", label="/".join(family))
         ax.axhline(0, color="gray", linewidth=1)
         ax.set_xlabel("Actual KEEP fraction (rounded count)")
         ax.set_ylabel("Accepted-prefix gain vs same-event fresh-L")
         ax.legend(fontsize=7)
     figure("10_keep_gain.png", "KEEP fraction vs accepted-prefix gain", ratios, not frame2.empty)
     event_causes = []
-    for event, base in fresh.items():
-        arms = [x for x in two if x["event_id"] == event]
-        a = next((x for x in arms if x["method"] == "oracle_A"), None)
-        if a is None:
-            continue
-        best = max((x["metrics"]["accepted_prefix"] for x in arms if x["oracle"]), default=0)
-        guided = max((x["metrics"]["accepted_prefix"] for x in arms if x["method"].startswith(("verifier_confidence", "old_agreement"))), default=0)
-        f = base["metrics"]["accepted_prefix"]
-        event_causes.append({"event_id": event, "oracle_A_gain": a["metrics"]["accepted_prefix"]-f,
-            "bounded_oracle_gain": best-f, "best_guided_gain": guided-f,
-            "selector_gap": best > f and guided <= f,
-            "no_observed_infill_headroom": best <= f,
-            "oracle_A_harmful": a["metrics"]["accepted_prefix"] < f})
+    for (event, redrafter), base in fresh.items():
+        arms = [x for x in two if x["event_id"] == event and x["redrafter"] == redrafter]
+        event_causes.append({"event_id": event, "redrafter": redrafter, "source": base["source"], "dataset": base["dataset"], **event_gains(arms)})
     atomic_json(destination / "event_causes.json", event_causes)
+    cross, controls, quality, repairability = [], [], [], []
+    by_arm = defaultdict(dict)
+    for row in rows2:
+        by_arm[(row["event_id"], row["method"])][row["redrafter"]] = row
+    raw = {(r["event_id"], r["redrafter"], r["method"]): r for r in two}
+    for (event, method), pair in by_arm.items():
+        if set(pair) != {"dllm_top1", "ar_greedy"}:
+            continue
+        d, a = pair["dllm_top1"], pair["ar_greedy"]
+        dp, ap = raw[event, "dllm_top1", method], raw[event, "ar_greedy", method]
+        if dp.get("anchors") != ap.get("anchors"):
+            raise AssertionError("Cross-redrafter anchor plans differ")
+        cross.append({"event_id": event, "prompt_id": d["prompt_id"], "dataset": d["dataset"],
+            "source": d["source"], "method": method,
+            "dllm_gain": d["gain"], "ar_gain": a["gain"], "gain_interaction": d["gain"]-a["gain"],
+            "dllm_draft_delta_ms": d["latency_delta_ms"], "ar_draft_delta_ms": a["latency_delta_ms"],
+            "draft_delta_interaction_ms": d["latency_delta_ms"]-a["latency_delta_ms"],
+            "dllm_pipeline_wall_delta_ms": d["pipeline_wall_delta_ms"],
+            "ar_pipeline_wall_delta_ms": a["pipeline_wall_delta_ms"]})
+    for row in two:
+        if row["arm_family"] != "conditioning":
+            continue
+        old = raw.get((row["event_id"], row["redrafter"], "future_old"))
+        controls.append({k: row.get(k) for k in ("event_id", "prompt_id", "dataset", "source", "redrafter",
+            "method", "uses_reference", "probe_horizon", "probe_accepted_prefix", "probe_gain",
+            "content_changed_from_old", "future_anchors_visible_to_probe")} |
+            {"anchor_count": len(row["keep"]), "positions": row["keep"],
+             "content_probe_delta_vs_old": row["probe_accepted_prefix"]-old["probe_accepted_prefix"]})
+    if not frame1.empty:
+        for (dataset, source), part in frame1.groupby(["dataset", "source"]):
+            quality.append({"dataset": dataset, "source": source, "proposals": len(part),
+                "accepted_prefix_mean": part.accepted_prefix.mean(), "full_accept_rate": part.all_accepted.mean(),
+                "draft_wall_ms_mean": part.draft_latency_ms.mean(), "draft_forwards_mean": part.draft_forwards.mean()})
+            eligible = part[part.suffix_length > 0]
+            repairability.append({"dataset": dataset, "source": source, "all_proposals": len(part),
+                "nonempty_suffix_events": len(eligible),
+                "conditional_macro_match_rate": eligible.suffix_match_rate.mean() if len(eligible) else None,
+                "conditional_pooled_match_rate": eligible.suffix_match_count.sum()/eligible.suffix_length.sum() if len(eligible) else None,
+                "conditional_reusable_event_rate": (eligible.suffix_match_count > 0).mean() if len(eligible) else None,
+                "correct_suffix_tokens_per_proposal": part.suffix_match_count.sum()/len(part)})
+    for name, records in (("cross_redrafter", cross), ("conditioning", controls),
+                          ("draft_quality", quality), ("repairability", repairability)):
+        pd.DataFrame(records).to_csv(destination/(name+".csv"), index=False)
+    summarize(pd.DataFrame(cross), ["dataset", "source", "method"],
+              ["gain_interaction", "draft_delta_interaction_ms"], "cross_redrafter_interaction")
+    summarize(pd.DataFrame(controls), ["dataset", "source", "redrafter", "method"],
+              ["probe_gain", "content_probe_delta_vs_old"], "future_content_control")
+    pd.DataFrame(summaries).to_csv(destination/"summary.csv", index=False)
+    from .experiment import progress_bin
+    prefix_coverage = []
+    for ref in refs:
+        counts = {b: sum(progress_bin(o, len(ref["tokens"])) == b for o in ref["offsets"])
+                  for b in ("early", "middle", "late")}
+        prefix_coverage.append({"prompt_id": ref["id"], "dataset": ref["dataset"],
+            "reference_length": len(ref["tokens"]), **counts,
+            "missing_progress_bins": [b for b, n in counts.items() if not n]})
+    atomic_json(destination/"prefix_coverage.json", prefix_coverage)
     report = {"status": status, "reference_prompts": len(refs), "eligible_states": sum(len(r["offsets"]) for r in refs),
         "no_eligible_state_prompts": sum(not r["offsets"] for r in refs), "test1_proposals": len(one),
         "paired_states": len(paired), "nonempty_rejection_events": sum(r["metrics"]["suffix_length"] > 0 for r in one),
         "sampled_test2_events": len(store.get("meta", "test2_sample") or []),
         "complete_test2_events": len(store.rows("event_complete")), "test2_arms": len(two),
         "reusable_suffix_events": sum(r["metrics"]["suffix_match_count"] > 0 for r in one),
-        "selector_gap_events": sum(x["selector_gap"] for x in event_causes),
-        "no_observed_infill_headroom_events": sum(x["no_observed_infill_headroom"] for x in event_causes)}
+        "complete_redrafter_pairs": len(store.rows("pair_complete")),
+        "oracle_selector_gap_pairs": sum(x["oracle_selector_gap"] for x in event_causes),
+        "no_bounded_correct_keep_gain_pairs": sum(x["no_bounded_correct_keep_gain"] for x in event_causes),
+        "no_observed_gain_pairs": sum(x["no_observed_gain"] for x in event_causes),
+        "conditioning_arms": len(controls), "cross_redrafter_comparisons": len(cross)}
     atomic_json(destination / "report.json", report)
     text = "# Suffix diagnostic report\n\n" + "\n".join(f"- {k}: {v}" for k, v in report.items())
     text += "\n\nMean, median, N and 95% prompt-cluster bootstrap intervals are in summary.csv. "
     text += "Paired dLLM-minus-AR comparisons use common states; conditional suffix-rate differences require nonempty suffixes in both. "
-    text += "Read benchmark/source/rejection/horizon strata before comparing aggregates. Confidence curves and feature scores are descriptive, without fitted selectors.\n\n"
-    text += "Oracle A is not a global upper bound. B is a bounded search triggered when A does not improve fresh-L. "
+    text += "cross_redrafter.csv reports each arm gain and time delta against its OWN redrafter fresh-L before comparing architectures. conditioning.csv uses identical future positions/count, with a strict AR causal negative control. sampling_coverage.json records available/selected/empty source/benchmark/rejection/progress strata. Read benchmark/source/redrafter/rejection/horizon strata before comparing aggregates. Confidence curves and feature scores are descriptive, without fitted selectors.\n\n"
+    text += "Oracle A is not a global upper bound. B is a bounded search run identically for both redrafters, regardless of A gain. Correct/wrong future-content controls use offline labels and are not deployable selectors or automatically recovered old tokens. "
     text += "A selector gap suggests studying feedback/selection; failure of bounded oracles suggests checking geometry audits, mask patterns and infilling ability, without identifying a unique cause.\n\n"
     text += "Timing: verifier stats use CUDA compute-stage events excluding Accelerate dispatch copies; wall_latency_ms is preserved separately. Stage time excludes inter-GPU copies and orchestration outside selected stages and is not end-to-end latency. Drafter plots use one-GPU synchronized cold-replay wall time with no peer transfer. Do not interpret wall-minus-stage as measured communication time.\n\n"
     text += "All latency is synchronized independent cold replay, including completed-prefix reconstruction; mutable-only time is also exported. "
-    text += "Identical masks share one measured inference; aliases are dependent observations. Selector time is event-level, oracle acquisition/search is excluded from per-arm latency. "
-    text += "There is no online rollback/reverification benchmark and no evidence of end-to-end speedup. Drafts are fixed horizon even after draft EOS; target reference stops at EOS and states need a full horizon plus bonus token. "
+    text += "Identical anchor positions AND contents share one measured inference within an event/redrafter; aliases are dependent observations. Selector time is event-level, oracle acquisition/search is excluded from per-arm latency. "
+    text += "Every unique repaired candidate is reverified, with a hard target/reference consistency check. This is an offline cold replay, without an online rollback benchmark and no evidence of end-to-end speedup. Drafts are fixed horizon even after draft EOS; target reference stops at EOS and states need a full horizon plus bonus token. "
     text += "Partial runs are not completed pilot results. Decide whether to build an online method only after complete results and uncertainty show useful paired suffix headroom, oracle gain and measurable compute savings.\n"
+    text += "Differences compare these trained checkpoints and schedules; they do not isolate architecture from training or other model differences.\n"
     (destination / "REPORT.md").write_text(text, encoding="utf-8")
     store.close()
     return report
