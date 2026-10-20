@@ -2,6 +2,8 @@
 
 The failed user pilot ZIP (SHA25628ea6a7ee87a5ef87b9e52f78b08a0b8b480186f43f7618dffbae68ebff1647e) was audited:200 references,118 passing Test1 rows, archived failure at GSM8K1310/offset167. Independent local import of this ACTUAL unpacked DB kept200/118 exactly, archived one failure, and left input bytes unchanged. The new controlled shape-dependent model reproduces parallel/cached disagreement and tests actual tokenwise replay; wrong replay and corrupted committed prefixes remain hard failures. Tiny random official Qwen replay matches its cached reference. Migration tests reject incompatible config/revision/precision, ambiguous inputs and legacy Test2 checkpoints, and test same-runtime resume and archived failure evidence. The complete local recovery suite passed88 tests without skips, including the one-cell unpacked-input entry and the real checkpoint import exercise. No pretrained GPU is available locally; the resume cell runs original pretrained preflight and the exact archived failure on the user's GPUs before remaining work.
 
+Recovery runtime is pinned to fa330e5836db310172ced163162d511f6b2036b5; the unchanged verified launcher remains274762b1cb9e5d8058bced1d7672152748c0a9df / SHA2568797900ba4561981d8fe6968f797706a1e963e9caee6ea5ddad293f6f79c1ac8.
+
 ---
 
 # Current v4 validation — two cohorts and cost reporting

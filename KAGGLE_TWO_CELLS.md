@@ -11,7 +11,7 @@ import torch
 if torch.cuda.device_count() < 2:
     raise RuntimeError("Select GPU T4 x2 and enable Internet in Kaggle Settings.")
 
-_suffix_revision = "bdcdfc3335e590fe1c1283273b2fd0cf3d16befe"
+_suffix_revision = "fa330e5836db310172ced163162d511f6b2036b5"
 _suffix_launcher_revision = "274762b1cb9e5d8058bced1d7672152748c0a9df"
 _suffix_url = (
     "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
@@ -35,7 +35,7 @@ import torch
 if torch.cuda.device_count() < 2:
     raise RuntimeError("Select GPU T4 x2 and enable Internet in Kaggle Settings.")
 
-_suffix_revision = "bdcdfc3335e590fe1c1283273b2fd0cf3d16befe"
+_suffix_revision = "fa330e5836db310172ced163162d511f6b2036b5"
 _suffix_launcher_revision = "274762b1cb9e5d8058bced1d7672152748c0a9df"
 _suffix_url = (
     "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
