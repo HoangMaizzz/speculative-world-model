@@ -1,6 +1,6 @@
 # Independent single-cell Kaggle runs
 
-Enable Internet and GPU T4 x2; no GitHub token is required. Each cell works in a fresh kernel. Protocol v3: source AR/dLLM x redrafter AR/dLLM, frozen future-anchor controls. Smoke runs5+5 with up to3 prefixes and256-token references. Pilot runs100+100 with its own correctness checks; it never requires smoke globals/status. For Save Version, put ONLY the pilot cell in its own notebook, then Save & Run All. Separate one-code-cell files: math_gsm8k_smoke.ipynb and math_gsm8k_pilot.ipynb. Launcher/source revision and SHA256 are pinned. Both runs export ZIP and report complete/partial/failed. To resume a new session, attach exactly one matching ZIP as input and run the same cell; it restores automatically.
+Enable Internet and GPU T4 x2; no GitHub token is required. Each cell works in a fresh kernel. Protocol v4: disjoint representative/enriched cohorts, weighted population reporting, source AR/dLLM x redrafter AR/dLLM, three anchor seeds/layouts. Smoke runs5+5 with up to3 prefixes,256-token references and24 target Test2 events (12+12); shortages are reported. Pilot runs100+100 with its own correctness checks; it never requires smoke globals/status. For Save Version, put ONLY the pilot cell in its own notebook, then Save & Run All. Separate one-code-cell files: math_gsm8k_smoke.ipynb and math_gsm8k_pilot.ipynb. Launcher/source revision and SHA256 are pinned. Both runs export ZIP and report complete/partial/failed. To resume a new session, attach exactly one matching ZIP as input and run the same cell; it restores automatically.
 
 ```python
 # SMOKE 5 MATH + 5 GSM8K: this cell includes the entire setup and execution.
@@ -11,7 +11,7 @@ import torch
 if torch.cuda.device_count() < 2:
     raise RuntimeError("Select GPU T4 x2 and enable Internet in Kaggle Settings.")
 
-_suffix_revision = "c78cd1ba7da5f52b078a7537460e08f949746c39"
+_suffix_revision = "bdcdfc3335e590fe1c1283273b2fd0cf3d16befe"
 _suffix_launcher_revision = "274762b1cb9e5d8058bced1d7672152748c0a9df"
 _suffix_url = (
     "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
@@ -35,7 +35,7 @@ import torch
 if torch.cuda.device_count() < 2:
     raise RuntimeError("Select GPU T4 x2 and enable Internet in Kaggle Settings.")
 
-_suffix_revision = "c78cd1ba7da5f52b078a7537460e08f949746c39"
+_suffix_revision = "bdcdfc3335e590fe1c1283273b2fd0cf3d16befe"
 _suffix_launcher_revision = "274762b1cb9e5d8058bced1d7672152748c0a9df"
 _suffix_url = (
     "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"

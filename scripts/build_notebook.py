@@ -168,7 +168,7 @@ if not (callable(globals().get("lab")) and
 assert callable(globals().get("lab")), "Setup did not define lab; inspect the preceding error."
 '''
 
-SINGLE_CELL_REVISION = "c78cd1ba7da5f52b078a7537460e08f949746c39"
+SINGLE_CELL_REVISION = "bdcdfc3335e590fe1c1283273b2fd0cf3d16befe"
 SINGLE_CELL_LAUNCHER_REVISION = "274762b1cb9e5d8058bced1d7672152748c0a9df"
 SINGLE_CELL_SHA256 = "8797900ba4561981d8fe6968f797706a1e963e9caee6ea5ddad293f6f79c1ac8"
 
@@ -223,7 +223,7 @@ def build():
     (ROOT/"KAGGLE_CELLS.md").write_text(intro+"\n"+"\n\n".join("```python\n"+source+"```" for source in cells)+"\n", encoding="utf-8")
     quick_intro = ("# Independent single-cell Kaggle runs\n\n"
                    "Enable Internet and GPU T4 x2; no GitHub token is required. Each cell works in a fresh kernel. "
-                   "Protocol v3: source AR/dLLM x redrafter AR/dLLM, frozen future-anchor controls. Smoke runs5+5 with up to3 prefixes and256-token references. Pilot runs100+100 with its own correctness checks; it never requires smoke globals/status. "
+                   "Protocol v4: disjoint representative/enriched cohorts, weighted population reporting, source AR/dLLM x redrafter AR/dLLM, three anchor seeds/layouts. Smoke runs5+5 with up to3 prefixes,256-token references and24 target Test2 events (12+12); shortages are reported. Pilot runs100+100 with its own correctness checks; it never requires smoke globals/status. "
                    "For Save Version, put ONLY the pilot cell in its own notebook, then Save & Run All. "
                    "Separate one-code-cell files: math_gsm8k_smoke.ipynb and math_gsm8k_pilot.ipynb. "
                    "Launcher/source revision and SHA256 are pinned. Both runs export ZIP and report complete/partial/failed. "

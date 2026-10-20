@@ -2,6 +2,8 @@
 
 The user's prior GPU v3 ZIP passed6977 artifact checks,60 proposals/8events/16model-event pairs. That validates the prior FP16 inference paths, not the NEW v4 sampling/reporting/24-event run. The complete v4 local suite passed76 tests without skips, including hand-computed sampling weights/means, no-reference selection leakage, shortfall/coverage guards, all3oracle boundaries,3seed paired controls and persisted-cohort/plan resume. Local resampling of the actual v3 Test1 records yields12 representative +12 enriched with early/middle/late in both groups, without rerunning a GPU. The v4 code keeps those inference paths and adds frozen disjoint representative/enriched design, inclusion weights, report guards for zero-coverage or partial estimates, correct-count/island/position strata, separate oracle types, three anchor seeds/layouts and explicit benefit/cost outcomes. Repaired candidates now preserve full verifier stage metadata for later audits. Local checks and GPU smoke evidence are reported separately; pretrained v4 GPU execution is still pending.
 
+Runtime v4 pin:bdcdfc3335e590fe1c1283273b2fd0cf3d16befe. Existing launcher274762b1cb9e5d8058bced1d7672152748c0a9df and SHA2568797900ba4561981d8fe6968f797706a1e963e9caee6ea5ddad293f6f79c1ac8 are unchanged.
+
 ---
 
 # Current validation: protocol v3 (20 October 2026)
