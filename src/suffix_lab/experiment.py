@@ -183,7 +183,7 @@ class Runner:
                         target_device_map={name: str(device) for name, device in self.target.hf_device_map.items()},
                         target_latency_policy="cuda_stage_events_excluding_dispatch_copies",
                         allow_fp16_reduced_precision_reduction=torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction)
-        identity = {"protocol": "suffix-top1-v3-cross-redrafter-conditioning", "config": config,
+        identity = {"protocol": "suffix-top1-v4-two-cohort-repairability", "config": config,
                     "source_digest": source_digest(),
                     "asset_digest": manifest["content_digest"], "target_precision": precision,
                     "tokenizer": token_evidence, "environment": self.env}

@@ -5,7 +5,8 @@ from .selection import oracle_masks
 
 def anchor_plan(method, anchors, family, uses_reference=False, **extra):
     return {"method": method, "anchors": [[i, int(t)] for i, t in sorted(anchors.items())],
-            "arm_family": family, "uses_reference": uses_reference, **extra}
+            "arm_family": family, "uses_reference": uses_reference,
+            "oracle_kind": "none", **extra}
 
 
 def conditioning_plans(old, gold, config, seed):
@@ -41,6 +42,20 @@ def complete_plans(obs, gold, config, seed, nonoracle):
              for method, keep in nonoracle]
     for i, keep in enumerate(oracle_masks(obs.old_tokens, gold, config["oracle_subset_limit"], seed)):
         plans.append(anchor_plan("oracle_A" if i == 0 else f"oracle_B#{i}",
-                                 {j: obs.old_tokens[j] for j in keep}, "oracle", True))
-    controls, metadata = conditioning_plans(obs.old_tokens, gold, config, seed)
+                                 {j: obs.old_tokens[j] for j in keep}, "oracle", True,
+                                 oracle_kind="old_token_keep" if i == 0 else "bounded_old_token_mask"))
+    controls, metadata = [], []
+    for repeat in config.get("conditioning_seeds", [0]):
+        actual_seed = seed+1009*repeat
+        group, evidence = conditioning_plans(obs.old_tokens, gold, config, actual_seed)
+        for plan in group:
+            plan["conditioning_repeat"] = repeat
+            plan["conditioning_seed"] = actual_seed
+            if repeat:
+                plan["method"] += f"#seed{repeat}"
+            plan["oracle_kind"] = ("future_reference_injection" if plan["conditioning_variant"] == "correct"
+                                   else "future_wrong_label_control" if plan["conditioning_variant"] == "wrong"
+                                   else "future_content_control")
+        controls.extend(group)
+        metadata.append({"repeat": repeat, "seed": actual_seed, **evidence})
     return plans+controls, metadata

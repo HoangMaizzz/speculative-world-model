@@ -1,3 +1,9 @@
+# Current v4 validation — two cohorts and cost reporting
+
+The user's prior GPU v3 ZIP passed6977 artifact checks,60 proposals/8events/16model-event pairs. That validates the prior FP16 inference paths, not the NEW v4 sampling/reporting/24-event run. The complete v4 local suite passed76 tests without skips, including hand-computed sampling weights/means, no-reference selection leakage, shortfall/coverage guards, all3oracle boundaries,3seed paired controls and persisted-cohort/plan resume. Local resampling of the actual v3 Test1 records yields12 representative +12 enriched with early/middle/late in both groups, without rerunning a GPU. The v4 code keeps those inference paths and adds frozen disjoint representative/enriched design, inclusion weights, report guards for zero-coverage or partial estimates, correct-count/island/position strata, separate oracle types, three anchor seeds/layouts and explicit benefit/cost outcomes. Repaired candidates now preserve full verifier stage metadata for later audits. Local checks and GPU smoke evidence are reported separately; pretrained v4 GPU execution is still pending.
+
+---
+
 # Current validation: protocol v3 (20 October 2026)
 
 The user's previous GPU ZIP (SHA256 a61aacddb839137fa7fad1afb5bd9224f6315b524490529c24f1f73c38849b05) passed the PRIOR FP16 protocol: 2 Tesla T4,10 prompts,20 states,40 proposals,8 Test2events,201 arms,10 plots,342.996s including prepare/preflight, excluding launcher setup. Exact two-GPU map, tokenizer, target cached/parallel/causal-tail checks, dLLM cache/KEEP geometry and AR passed. A separate3397-check audit verified that artifact. This is user-run evidence, not an agent GPU execution, and it does NOT validate new constrained AR, crossed repairs, controls, or pilot speed/quality. The old pipeline was cold replay, not online rollback.

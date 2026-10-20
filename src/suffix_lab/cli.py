@@ -8,7 +8,7 @@ def configuration(args):
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
     if args.smoke:
         config.update(prompts_per_dataset=5, prefixes_per_prompt=3, reference_tokens=256,
-                      test2_events=8, oracle_subset_limit=4, bootstrap_samples=200)
+                      test2_events=24, oracle_subset_limit=4, bootstrap_samples=200)
     if not 0 < config["prefixes_per_prompt"] <= 5 or config["proposal_length"] != 32:
         raise ValueError("This protocol requires proposal32 and 1–5 prefixes")
     if (config["physical_block_size"], config["subblock_size"]) != (32, 8):
@@ -17,6 +17,10 @@ def configuration(args):
         raise ValueError("Both redrafters must run exactly once")
     if config["conditioning_anchor_count"] < 1 or config["conditioning_probe_tokens"] < 1:
         raise ValueError("Conditioning needs positive anchor count and probe horizon")
+    if config["test2_events"] < 2:
+        raise ValueError("Test2 needs a budget for both cohorts")
+    if not config["conditioning_seeds"] or len(set(config["conditioning_seeds"])) != len(config["conditioning_seeds"]):
+        raise ValueError("Conditioning seeds must be nonempty and unique")
     return config
 
 

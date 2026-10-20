@@ -75,11 +75,13 @@ class PipelineTests(unittest.TestCase):
                     with self.assertRaisesRegex(TimeoutError, "soft budget"):
                         runner.test2()
                 frozen = runner.store.rows("repair_plan")
+                frozen_design = runner.store.get("meta", "test2_design")
                 saved_arm = runner.store.rows("test2")[0]
                 self.assertFalse(runner.store.rows("event_complete"))
                 runner.test2()
                 self.assertEqual(loaded, [DLLM, AR, DLLM, DLLM, AR])
                 self.assertEqual(frozen, runner.store.rows("repair_plan"))
+                self.assertEqual(frozen_design, runner.store.get("meta", "test2_design"))
                 self.assertEqual(saved_arm, runner.store.get("test2", saved_arm["id"]))
                 self.assertEqual(len(runner.store.rows("pair_complete")), 4)
                 self.assertTrue(all(ref() is None for ref in weak_models))
@@ -88,6 +90,8 @@ class PipelineTests(unittest.TestCase):
                 for row in old:
                     self.assertEqual(row["horizon"], 32-row["first_rejection"])
                     self.assertEqual(row["stats"]["unmask_steps"], row["horizon"]-len(row["keep"]))
+                    self.assertIn(row["cohort"], ("representative", "enriched"))
+                    self.assertIn(row["correct_count_bin"], ("0", "1", "2-3", "4+"))
                 from collections import defaultdict
                 matrix = defaultdict(dict)
                 for row in old:
@@ -106,6 +110,10 @@ class PipelineTests(unittest.TestCase):
                 report = analyze(tmp, 20)
                 self.assertEqual(report["paired_states"], 2)
                 self.assertEqual(report["complete_test2_events"], 2)
+                self.assertEqual(report["cohort_design"]["groups"]["representative"]["selected"], 1)
+                self.assertEqual(report["cohort_design"]["groups"]["enriched"]["selected"], 1)
+                for name in ("oracle_comparison.json", "efficiency.csv", "benefit_outcomes.csv", "representative_population_estimates.json"):
+                    self.assertTrue((Path(tmp)/"analysis"/name).exists())
                 self.assertEqual(len(list((Path(tmp)/"analysis").glob("*.png"))), 10)
 
 

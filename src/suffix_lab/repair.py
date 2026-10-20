@@ -8,16 +8,19 @@ from .store import atomic_json, digest
 
 
 def run_repairs(runner):
-    from .experiment import stratified_events, sampling_coverage, nonoracle_plans
+    from .experiment import nonoracle_plans
+    from .sampling import freeze_sample, correct_bin
     from .runtime import ARSession, DLLMDrafter, load_model, release, memory
     c, store = runner.config, runner.store
     if not store.get("meta", "test1_complete"):
         raise ValueError("Finish Test 1 before freezing the Test 2 sample")
-    selected = store.get("meta", "test2_sample")
-    if selected is None:
-        selected = stratified_events(store.rows("test1"), c["test2_events"], c["seed"], c["test2_sources"])
-        store.put("meta", "test2_sample", selected)
-    atomic_json(runner.output/"sampling_coverage.json", sampling_coverage(store.rows("test1"), selected, c))
+    design = store.get("meta", "test2_design")
+    if design is None:
+        design = freeze_sample(store.rows("test1"), c)
+        store.put("meta", "test2_design", design)
+    selected = design["events"]
+    store.put("meta", "test2_sample", selected)
+    atomic_json(runner.output/"sampling_coverage.json", design)
     # A single immutable plan (including bounded oracle subsets) for both models.
     for event in selected:
         if store.get("repair_plan", event):
@@ -79,7 +82,7 @@ def run_repairs(runner):
                                 "tokens": result.tokens, "reference": gold, "feedback": feedback})
                             raise AssertionError("Repair target/reference disagree: "+key)
                         measured = {"tokens": result.tokens, "stats": result.stats,
-                            "verification": {k: feedback[k] for k in ("top1", "latency_ms", "wall_latency_ms", "latency_policy", "input_tokens") if k in feedback},
+                            "verification": {k: feedback[k] for k in ("top1", "latency_ms", "wall_latency_ms", "latency_policy", "input_tokens", "compute_by_device_ms", "timed_stage_calls", "timed_stages") if k in feedback},
                             "verified_accepted_prefix": accepted,
                             "pipeline_wall_ms": (time.perf_counter()-begin)*1000}
                     else:
@@ -95,12 +98,19 @@ def run_repairs(runner):
                                for i in range(probe or 0)]
                     payload = {"id": key, "event_id": event, "redrafter": redrafter,
                         "prompt_id": row["prompt_id"], "dataset": row["dataset"], "source": row["source"],
+                        **design["members"][event],
+                        "old_correct_count": row["metrics"]["suffix_match_count"],
+                        "correct_count_bin": correct_bin(row["metrics"]["suffix_match_count"]),
+                        "old_max_island_length": row["metrics"]["max_island_length"],
+                        "correct_old_positions": [i for i, t in enumerate(old) if t == gold[i]],
                         **plan, "oracle": plan["uses_reference"], "first_rejection": r, "horizon": len(old),
                         "progress_bin": row.get("progress_bin", "unknown"), "context_length": len(prefix),
                         "physical_phase": len(prefix)%32, "keep": sorted(anchors), "keep_ratio": len(anchors)/len(old),
                         **measured, "metrics": metrics, "mask_reused_from": previous["id"] if previous else None,
                         "selector_ms_event": frozen["selector_ms_event"],
                         "latency_policy": "independent cold replay; verifier stage compute and wall separate",
+                        "pre_anchor_accepted_prefix": min(metrics["accepted_prefix"], min(anchors)) if probe else None,
+                        "pre_anchor_gain": min(metrics["accepted_prefix"], min(anchors))-min(baseline["metrics"]["accepted_prefix"], min(anchors)) if probe else None,
                         "probe_accepted_prefix": min(metrics["accepted_prefix"], probe) if probe else None,
                         "probe_gain": min(metrics["accepted_prefix"], probe)-min(baseline["metrics"]["accepted_prefix"], probe) if probe else None,
                         "future_anchors_visible_to_probe": visible}

@@ -86,8 +86,36 @@ def event_gains(arms):
     bounded, observed, selected = gain(oracle), gain(arms), gain(nonoracle)
     return {"oracle_A_gain": a["metrics"]["accepted_prefix"]-baseline if a else None,
             "bounded_oracle_gain": bounded, "best_nonoracle_gain": selected,
+            "oracle_keep_gain": a["metrics"]["accepted_prefix"]-baseline if a else None,
+            "bounded_old_mask_search_gain": bounded,
+            "oracle_future_injection_gain": gain([x for x in arms if x.get("oracle_kind") == "future_reference_injection"]),
             "best_guided_gain": gain(guided), "wrong_anchor_gain": gain(wrong),
             "conditioning_gain": gain([x for x in arms if family(x) == "conditioning"]),
             "best_observed_gain": observed, "oracle_selector_gap": bounded > 0 and selected <= 0,
             "no_bounded_correct_keep_gain": bounded <= 0, "no_observed_gain": observed <= 0}
 
+
+
+def benefit_metrics(row, baseline):
+    """Paired costs, useful-token rates and a conservative false-KEEP diagnosis."""
+    a, f = row["metrics"]["accepted_prefix"], baseline["metrics"]["accepted_prefix"]
+    dt = row["stats"]["latency_ms"]-baseline["stats"]["latency_ms"]
+    draft = row["stats"]["latency_ms"]
+    verification = row.get("verification", {}).get("latency_ms")
+    wall_verify = row.get("verification", {}).get("wall_latency_ms")
+    first_false = row["metrics"]["first_false_keep"]
+    loss = a < f
+    capped = loss and first_false == a
+    if a > f:
+        outcome = "accepted_prefix_increased"
+    elif a == f:
+        outcome = "equal_prefix_cheaper_draft" if dt < 0 else "equal_prefix_no_draft_saving"
+    elif capped:
+        outcome = "loss_capped_at_false_keep"
+    else:
+        outcome = "prefix_loss_with_false_keep" if row["metrics"]["false_keep_count"] else "prefix_loss_without_false_keep"
+    return {"outcome": outcome, "false_keep_caps_prefix": capped,
+        "loss_with_false_keep": loss and row["metrics"]["false_keep_count"] > 0,
+        "accepted_tokens_per_draft_ms": a/draft if draft > 0 else None,
+        "accepted_tokens_per_draft_verify_compute_ms": a/(draft+verification) if verification is not None and draft+verification > 0 else None,
+        "accepted_tokens_per_draft_verify_wall_ms": a/(draft+wall_verify) if wall_verify is not None and draft+wall_verify > 0 else None}

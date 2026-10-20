@@ -1,6 +1,9 @@
 {
   "seed": 42,
-  "datasets": ["math500", "gsm8k"],
+  "datasets": [
+    "math500",
+    "gsm8k"
+  ],
   "prompts_per_dataset": 100,
   "prefixes_per_prompt": 5,
   "reference_tokens": 256,
@@ -14,17 +17,29 @@
   "exclude_inter_gpu_transfer_time": true,
   "allow_fp16_reduced_precision_reduction": false,
   "allow_nf4_fallback": false,
-  "keep_ratios": [0.5],
+  "keep_ratios": [
+    0.5
+  ],
   "random_repeats": 1,
   "oracle_subset_limit": 4,
-  "redrafters": ["dllm_top1", "ar_greedy"],
+  "redrafters": [
+    "dllm_top1",
+    "ar_greedy"
+  ],
   "conditioning_anchor_count": 4,
   "conditioning_probe_tokens": 8,
   "test2_events": 200,
-  "test2_sources": ["dllm_top1", "ar_greedy"],
+  "test2_sources": [
+    "dllm_top1",
+    "ar_greedy"
+  ],
   "wall_hours": 6.0,
   "bootstrap_samples": 2000,
   "top_k": 8,
-  "max_prompt_tokens": 4096
+  "max_prompt_tokens": 4096,
+  "conditioning_seeds": [
+    0,
+    1,
+    2
+  ]
 }
-
