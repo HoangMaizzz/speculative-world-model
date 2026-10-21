@@ -206,6 +206,21 @@ class TinyModelTests(unittest.TestCase):
             self.assertEqual(len(result["trace"]), 19)
             self.assertEqual(result["tokens"][2:4], [4, 6])
 
+        # Test3 all-correct KEEP may exceed25% and include ALL old positions.
+        event3 = {"prefix": [1+i % 50 for i in range(31)], "L": 16, "H": 23}
+        native24 = audited_draft(drafter, event3["prefix"], 24, {})
+        self.assertEqual(len(native24["tokens"]), 24)
+        self.assertEqual(native24["stats"]["unmask_steps"], 24)
+        old = drafter.draft(event3["prefix"], 16).tokens
+        keep = dict(enumerate(old))
+        first3 = audited_draft(drafter, event3["prefix"], 16, keep)
+        first3["id"] = "test3-all-keep-short"
+        self.assertEqual(first3["stats"]["unmask_steps"], 0)
+        for result in (audited_draft(drafter, event3["prefix"], 23, keep), sequential_draft(drafter, event3, first3)):
+            self.assertEqual(result["tokens"][:16], old)
+            self.assertEqual(result["stats"]["unmask_steps"], 7)
+            self.assertEqual(len(result["trace"]), 7)
+
 
 if __name__ == "__main__":
     unittest.main()
