@@ -1,0 +1,22 @@
+{
+  "seed": 42,
+  "events_per_dataset": 100,
+  "datasets": ["gsm8k", "math500"],
+  "offsets": [0, 56, 111, 167, 223],
+  "window": 24,
+  "next_horizon": 23,
+  "reference_tokens": 270,
+  "soft_budget_seconds": 21600,
+  "audit_every_events": 10,
+  "bootstrap_samples": 2000,
+  "physical_block_size": 32,
+  "subblock_size": 8,
+  "mask_id": 151665,
+  "target_precision": "fp16",
+  "target_attention": "sdpa",
+  "target_gpu0_layers": 18,
+  "allow_nf4_fallback": false,
+  "exclude_peer_transfer_time": true,
+  "allow_fp16_reduced_precision_reduction": false,
+  "top_k": 8
+}
