@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 import random
 import sqlite3
+import tempfile
 from functools import lru_cache
 from .metrics import suffix_metrics, prefix_length
 from .migration import locate_unpacked
@@ -16,6 +17,7 @@ PILOT_SOURCE = "e2177c1da830f29fbab58a659208494a4f05305170444bebb7eacee536675a83
 
 
 def read_pilot(root):
+    print("[checkpoint] Locating unpacked pilot:", root, flush=True)
     folder = locate_unpacked(root)
     manifest = json.loads((folder/"run-manifest.json").read_text(encoding="utf-8"))
     if (manifest.get("protocol") != "suffix-top1-v4-audited-canonical-replay"
@@ -30,14 +32,41 @@ def read_pilot(root):
     if any(manifest["config"].get(k) != value for k, value in expected.items()):
         raise ValueError("Pilot numerical/scheduler configuration differs")
     path = folder/"checkpoint.sqlite"
-    conn = sqlite3.connect(path.as_uri()+"?mode=ro&immutable=1", uri=True)
-    try:
-        if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise ValueError("Pilot SQLite integrity failed")
-        records = {(kind, key): json.loads(value) for kind, key, value in
-                   conn.execute("SELECT kind,key,payload FROM records")}
-    finally:
-        conn.close()
+    size = path.stat().st_size
+    print(f"[checkpoint] Staging {size/2**20:.1f} MiB to local temporary storage; input stays read-only", flush=True)
+    fingerprint = hashlib.sha256()
+    # Mounted Kaggle input can make SQLite's repeated page reads expensive.
+    # Copy/hash in ONE sequential pass, then audit/query only the local copy.
+    with tempfile.TemporaryDirectory(prefix="suffix-mini-input-") as temporary:
+        local = Path(temporary)/"checkpoint.sqlite"
+        copied, next_log = 0, 16*2**20
+        with path.open("rb") as source, local.open("wb") as target:
+            while block := source.read(4*2**20):
+                target.write(block)
+                fingerprint.update(block)
+                copied += len(block)
+                if copied >= next_log:
+                    print(f"[checkpoint] Copied {copied/2**20:.0f}/{size/2**20:.0f} MiB", flush=True)
+                    next_log += 16*2**20
+        if copied != size:
+            raise ValueError("Checkpoint size changed while copying")
+        print("[checkpoint] Local SQLite integrity check", flush=True)
+        conn = sqlite3.connect(local.resolve().as_uri()+"?mode=ro&immutable=1", uri=True)
+        try:
+            if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise ValueError("Pilot SQLite integrity failed")
+            print("[checkpoint] Reading references, Test1, cohort metadata and dLLM Fresh-L baselines", flush=True)
+            records = {}
+            query = ("SELECT kind,key,payload FROM records WHERE "
+                     "kind IN ('meta','reference','test1','pair_complete','failure') "
+                     "OR (kind='test2' AND key LIKE '%|dllm_top1|fresh_L')")
+            for i, (kind, key, value) in enumerate(conn.execute(query), 1):
+                records[(kind, key)] = json.loads(value)
+                if i % 500 == 0:
+                    print(f"[checkpoint] Parsed {i} required records", flush=True)
+        finally:
+            conn.close()
+    print(f"[checkpoint] Ready: {len(records)} records; unused pilot arms skipped", flush=True)
     if records.get(("meta", "identity")) != manifest:
         raise ValueError("Pilot manifest/database identity mismatch")
     if not all(records.get(("meta", key)) for key in
@@ -47,7 +76,7 @@ def read_pilot(root):
         raise ValueError("Pilot contains unresolved failure records")
     design = records[("meta", "test2_design")]
     return {"manifest": manifest, "records": records, "design": design,
-            "checkpoint_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            "checkpoint_sha256": fingerprint.hexdigest()}
 
 
 def validate_event(row, ref):

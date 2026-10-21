@@ -195,7 +195,9 @@ def execute(checkpoint_root, output, revision):
     store = target = model = verifier = drafter = None
     started, status = time.monotonic(), "failed"
     try:
+        print("[mini] Runtime started; importing checkpoint before model loading", flush=True)
         pilot = read_pilot(checkpoint_root)
+        print("[mini] Selecting 10 events and freezing anchors", flush=True)
         inputs = freeze_inputs(pilot, config)
         del pilot
         if len(inputs["events"]) != config["events"]:

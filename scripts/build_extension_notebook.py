@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REVISION = "c0c0d021b842ef4bd41c9c33f58da88c9c763df4"
-LAUNCHER_SHA256 = "c7b30e3b8d6c24c5516affc5ba7d05e6e3718a2d1497a13e5ff09a0cce81b9bd"
+LAUNCHER_SHA256 = "a71679034010ee9755969b38bc803b8c3b4804b36fd27b382ee12f7df5c04cb6"
 
 
 def cell():

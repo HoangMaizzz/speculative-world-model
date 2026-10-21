@@ -39,6 +39,8 @@ Fresh-L chạy lại đúng10events để có unmask order/trace, vì Test2 pilo
 
 Session mới vẫn phải tải/nạp hai model, kiểm tokenizer và numerical environment so pilot, target repeatability/parallel/causal preflight. Không dùng suite preflight pilot có AR drafter. Trong quá trình chạy, mỗi unique dLLM stage được audit cached/full trên chính geometry thực.
 
+Checkpoint SQLite được copy/hash một lượt tuần tự sang thư mục tạm rồi mới integrity-check/query tại đó; không đọc SQLite lặp trực tiếp trên mounted input. Chỉ parse references, Test1, metadata, completion và dLLM Fresh-L cần dùng; bỏ qua các repair arms cũ không liên quan. File tạm được đóng/dọn trước khi tải model. Launcher chuyển stdout/stderr của tiến trình con về cell và `/kaggle/working/extension_run.log`; nếu im lặng15giây thì hiện heartbeat cùng dòng log gần nhất. Heartbeat chỉ chứng minh tiến trình chưa trả kết quả, không khẳng định đang tiến triển.
+
 H<=32 không bảo đảm single physical block. Ghi phase, absolute block/subblock, prediction-row/carry, extension-before-old-complete và actual future visibility. MASK padding vốn tồn tại trong short arm; không diễn giải extension như tự động thêm bidirectional context.
 
 Kết quả save mỗi arm; chạy lại cùng cell/output bỏ qua arms đã lưu, dùng đúng frozen identity. Clear unused CUDA cache cả2GPU sau mỗi event; các KV của mutable branch không tồn tại qua arm. Đóng gói partial ZIP cả khi input/setup runtime/preflight/inference thất bại nếu output còn ghi được. Setup pip log nằm riêng ở `/kaggle/working/extension_setup.log`.

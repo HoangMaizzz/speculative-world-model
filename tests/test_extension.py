@@ -103,11 +103,17 @@ class ExtensionTests(unittest.TestCase):
             for key in ("references_complete", "test1_complete", "test2_complete"):
                 store.put("meta", key, True)
             store.put("meta", "test2_design", {"members": {}})
+            store.put("test2", "unused|dllm_top1|oracle_A", {"unused": True})
+            store.put("test2", "unused|ar_greedy|fresh_L", {"unused": True})
+            store.put("test2", "needed|dllm_top1|fresh_L", {"keep": True})
             store.close()
             atomic_json(root/"run-manifest.json", identity)
             before = hashlib.sha256(path.read_bytes()).hexdigest()
             loaded = read_pilot(Path(tmp))
             self.assertEqual(loaded["checkpoint_sha256"], before)
+            self.assertNotIn(("test2", "unused|dllm_top1|oracle_A"), loaded["records"])
+            self.assertNotIn(("test2", "unused|ar_greedy|fresh_L"), loaded["records"])
+            self.assertIn(("test2", "needed|dllm_top1|fresh_L"), loaded["records"])
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
             bad = deepcopy(identity); bad["target_precision"] = "int8"
             atomic_json(root/"run-manifest.json", bad)

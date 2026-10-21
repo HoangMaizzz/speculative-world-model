@@ -4,6 +4,53 @@ from pathlib import Path
 import runpy
 import subprocess
 import sys
+import queue
+import threading
+import time
+
+
+def run_streamed(args, *, cwd, env, log_path, heartbeat_seconds=15):
+    """Explicitly relay child stdout/stderr into Jupyter and preserve a log."""
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    with log_path.open("a", encoding="utf-8") as log, subprocess.Popen(
+            args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", bufsize=1) as process:
+        messages = queue.Queue()
+        def reader():
+            try:
+                for line in process.stdout:
+                    messages.put(line)
+            finally:
+                messages.put(None)
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        last_line = "waiting for Python child startup"
+        try:
+            while True:
+                try:
+                    line = messages.get(timeout=heartbeat_seconds)
+                except queue.Empty:
+                    line = f"[launcher] Child running ({time.monotonic()-started:.0f}s). Last output: {last_line}\n"
+                    print(line, end="", flush=True)
+                    log.write(line); log.flush()
+                    continue
+                if line is None:
+                    break
+                print(line, end="", flush=True)
+                log.write(line); log.flush()
+                last_line = line.strip()[-240:] or last_line
+            thread.join()
+            return process.wait()
+        except BaseException:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill(); process.wait()
+            raise
 
 
 def launch(revision, checkpoint_root):
@@ -51,8 +98,11 @@ def launch(revision, checkpoint_root):
     print("dLLM -> AR only; strict 1 unmask/forward. Input:", checkpoint_root, "Output:", output, flush=True)
     child_env = installer["child_environment"]()
     child_env.pop("SUFFIX_RESUME_ROOT", None)
-    result = subprocess.run([str(python), "-u", "-m", "suffix_lab.extension", "--checkpoint-root", str(checkpoint_root),
-                            "--output", str(output), "--revision", revision], cwd=repo, env=child_env)
+    run_log = work/"extension_run.log"
+    print("Live output and diagnostic log:", run_log, flush=True)
+    code = run_streamed([str(python), "-u", "-m", "suffix_lab.extension", "--checkpoint-root", str(checkpoint_root),
+                         "--output", str(output), "--revision", revision],
+                        cwd=repo, env=child_env, log_path=run_log)
     from IPython.display import display, Markdown, FileLink
     if (output/"REPORT.md").exists():
         display(Markdown((output/"REPORT.md").read_text()))
@@ -60,7 +110,7 @@ def launch(revision, checkpoint_root):
     if archive.exists():
         print("ZIP:", archive, flush=True)
         display(FileLink(str(archive)))
-    if result.returncode:
+    if code:
         raise RuntimeError("Mini-extension failed; inspect the actual error above. Partial ZIP was preserved when possible.")
 
 

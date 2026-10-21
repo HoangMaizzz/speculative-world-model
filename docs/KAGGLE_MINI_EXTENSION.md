@@ -31,7 +31,7 @@ url = (
 )
 with urllib.request.urlopen(url, timeout=60) as response:
     source = response.read()
-if hashlib.sha256(source).hexdigest() != "c7b30e3b8d6c24c5516affc5ba7d05e6e3718a2d1497a13e5ff09a0cce81b9bd":
+if hashlib.sha256(source).hexdigest() != "a71679034010ee9755969b38bc803b8c3b4804b36fd27b382ee12f7df5c04cb6":
     raise RuntimeError("Launcher checksum không khớp.")
 scope = {
     "__name__": "__main__",
