@@ -192,6 +192,20 @@ class TinyModelTests(unittest.TestCase):
                     self.assertTrue(all(x.tokens[i] == t for i, t in anchor_set.items()))
                     self.assertEqual(x.stats["unmask_steps"], 35-len(anchor_set))
 
+        # Exercise the NEW joint/sequential runner on the official tiny random
+        # architecture. This establishes mechanics only, never pretrained quality.
+        from suffix_lab.extension import audited_draft, sequential_draft
+        event = {"prefix": [1+i % 50 for i in range(31)], "L": 13, "H": 21}
+        first = audited_draft(drafter, event["prefix"], 13, {2: 4, 3: 6})
+        first["id"] = "tiny-short"
+        sequential = sequential_draft(drafter, event, first)
+        joint = audited_draft(drafter, event["prefix"], 21, {2: 4, 3: 6})
+        self.assertEqual(sequential["tokens"][:13], first["tokens"])
+        for result in (sequential, joint):
+            self.assertEqual(result["stats"]["unmask_steps"], 19)
+            self.assertEqual(len(result["trace"]), 19)
+            self.assertEqual(result["tokens"][2:4], [4, 6])
+
 
 if __name__ == "__main__":
     unittest.main()
