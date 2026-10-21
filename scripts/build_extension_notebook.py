@@ -1,0 +1,67 @@
+"""Generate one immutable, self-contained mini-extension cell and notebook."""
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+REVISION = "c0c0d021b842ef4bd41c9c33f58da88c9c763df4"
+LAUNCHER_SHA256 = "c7b30e3b8d6c24c5516affc5ba7d05e6e3718a2d1497a13e5ff09a0cce81b9bd"
+
+
+def cell():
+    return f'''# MINI-TEST: dLLM -> AR, 10 events, 90 arms, 1 token/unmask forward
+import hashlib
+import urllib.request
+from pathlib import Path
+import torch
+
+checkpoint = Path("/kaggle/input/datasets/ainzkhail/checkpt")
+if not checkpoint.is_dir():
+    raise RuntimeError(f"Chưa tìm thấy checkpoint đã unzip: {{checkpoint}}")
+if torch.cuda.device_count() < 2:
+    raise RuntimeError("Bật GPU T4 x2 và Internet trong Kaggle Settings.")
+
+revision = "{REVISION}"
+url = (
+    "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
+    + revision + "/scripts/kaggle_extension_cell.py"
+)
+with urllib.request.urlopen(url, timeout=60) as response:
+    source = response.read()
+if hashlib.sha256(source).hexdigest() != "{LAUNCHER_SHA256}":
+    raise RuntimeError("Launcher checksum không khớp.")
+scope = {{
+    "__name__": "__main__",
+    "__file__": url,
+    "SUFFIX_EXTENSION_REVISION": revision,
+    "SUFFIX_EXTENSION_INPUT": str(checkpoint),
+}}
+exec(compile(source, "kaggle-mini-extension", "exec"), scope)
+'''
+
+
+def build():
+    source = cell()
+    description = """# Mini-test dLLM -> AR: redraft + extension
+
+GPU T4 x2, Internet ON. Add the unpacked pilot dataset at `/kaggle/input/datasets/ainzkhail/checkpt`.
+Run the single code cell, or Save Version with Run All. No GitHub token needed.
+
+10 dLLM-source rejection events: 5 MATH +5 GSM8K, 6 enriched +4 representative. Only dLLM redrafting and AR verification; no AR drafter. Nine arms/event, fixed E=8, strict one token per unmask forward in earliest absolute subblock8. Oracle and predicted anchors are frozen before inference.
+
+Reuse pilot references/Test1/event metadata. Replay only selected Fresh-L baselines for unmask traces and exact pilot comparison. Audit cached/full-prefix equality and reverify every unique final proposal. FP16 target across both GPUs; dLLM on GPU1. No latency or speedup claim.
+
+Output: `/kaggle/working/extension_mini/extension_checkpoint.zip`; includes CSVs, per-arm traces, report, and token-level `cases.html`. Partial output is preserved on runtime failure. Full protocol: `docs/MINI_EXTENSION.vi.md`.
+"""
+    notebook = {"cells": [
+        {"cell_type": "markdown", "id": "mini-extension-description", "metadata": {}, "source": description.splitlines(True)},
+        {"cell_type": "code", "id": "mini-extension-run", "metadata": {}, "execution_count": None,
+         "outputs": [], "source": source.splitlines(True)}],
+        "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+                     "language_info": {"name": "python"}}, "nbformat": 4, "nbformat_minor": 5}
+    (ROOT/"notebooks/mini_extension.ipynb").write_text(json.dumps(notebook, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
+    markdown = description+"\nRuntime: `"+REVISION+"`.\n\n```python\n"+source+"```\n"
+    (ROOT/"docs/KAGGLE_MINI_EXTENSION.md").write_text(markdown, encoding="utf-8")
+
+
+if __name__ == "__main__":
+    build()
