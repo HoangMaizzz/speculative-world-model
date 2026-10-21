@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REVISION = "c0c0d021b842ef4bd41c9c33f58da88c9c763df4"
+REVISION = "4f8359329e32cf66daafbd7d7fe961956f938d87"
 LAUNCHER_SHA256 = "a71679034010ee9755969b38bc803b8c3b4804b36fd27b382ee12f7df5c04cb6"
 
 

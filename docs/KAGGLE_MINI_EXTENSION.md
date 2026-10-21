@@ -9,7 +9,7 @@ Reuse pilot references/Test1/event metadata. Replay only selected Fresh-L baseli
 
 Output: `/kaggle/working/extension_mini/extension_checkpoint.zip`; includes CSVs, per-arm traces, report, and token-level `cases.html`. Partial output is preserved on runtime failure. Full protocol: `docs/MINI_EXTENSION.vi.md`.
 
-Runtime: `c0c0d021b842ef4bd41c9c33f58da88c9c763df4`.
+Runtime: `4f8359329e32cf66daafbd7d7fe961956f938d87`.
 
 ```python
 # MINI-TEST: dLLM -> AR, 10 events, 90 arms, 1 token/unmask forward
@@ -24,7 +24,7 @@ if not checkpoint.is_dir():
 if torch.cuda.device_count() < 2:
     raise RuntimeError("Bật GPU T4 x2 và Internet trong Kaggle Settings.")
 
-revision = "c0c0d021b842ef4bd41c9c33f58da88c9c763df4"
+revision = "4f8359329e32cf66daafbd7d7fe961956f938d87"
 url = (
     "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
     + revision + "/scripts/kaggle_extension_cell.py"
