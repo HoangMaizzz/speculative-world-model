@@ -78,6 +78,8 @@ Resume cùng thư mục: chạy lại cell tương ứng hoặc `run`. Resume ph
 
 Draft64 ordinary SD (current requested run, 100 MATH +100 GSM8K, FP16 T4x2): [protocol](docs/LONG64_PROTOCOL.vi.md), [standalone cell](docs/KAGGLE_LONG64.md), [notebook](notebooks/long64.ipynb). Every round drafts 64 fresh tokens, verifies, commits accepted prefix plus correction/bonus, and discards the remainder. No fixed anchors or suffix extension. Shifted spans/bridges are offline diagnostics only.
 
+The current B64 data-collection release adds an online canonical KV guard after observed FP16 parallel/cached divergence. It records extra serial target forwards and preserves raw parallel feedback. It is an audited correctness/headroom run, not a one-target-pass throughput benchmark; independent post-prompt canonical audits remain enabled.
+
 Draft60 online SD (previous variant): [protocol](docs/LONG60_PROTOCOL.vi.md) and [standalone Kaggle cell](docs/KAGGLE_LONG60.md). Its pinned revision remains available; B60 and B64 checkpoints cannot be mixed.
 
 - `core.py`: strict Top-1, một MASK mỗi bước, absolute physical32/active8, hard KEEP.

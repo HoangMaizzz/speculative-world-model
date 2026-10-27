@@ -1,25 +1,27 @@
-# Kaggle: draft64 → verify, 100 MATH +100 GSM8K
+# Kaggle B64: bản sửa numerical verification
 
-Bật **GPU T4 x2**, **Internet ON**, rồi chạy toàn bộ cell bên dưới. Đây là SD bình thường: mỗi vòng draft mới64tokens, verify, commit prefix đúng+correction/bonus, bỏ phần còn lại. **Không cố định anchor và không mở rộng suffix cũ.** Phân tích đoạn/bridge chỉ chạy offline sau generation và canonical audit.
+Runtime pin: `39890af682c068a51f5788594195f86e79a28575`. **100 MATH +100 GSM8K**, FP16 T4x2, draft64 mới mỗi vòng, không fixedanchor hoặc extend. Bật InternetON. Không cần inputZIP cũ.
 
-Runtime `b1d0b34e41b23b0748d202a26a0105b65a236066`; fixed FP16 models như trước. Native active8/physical32; mỗi unmask forward điền đúng một MASK. Output tối đa256tokens/câu hoặc EOS. Xem [protocol](LONG64_PROTOCOL.vi.md).
+Bản trước false-reject ở MATH327: drafter/canonical chọn ` a`, parallel target trả ` the` với top1–top2 margin.03125. Bản sửa giữ parallelverification và kiểm đường commit bằng actualcanonicalKV của cùngtarget trước khi emit. **Guard thêm serial target forwards**, nên đây là data-collection/correctness mode, không phải one-target-pass SD speed benchmark. Reference sau mỗi câu vẫn audit độc lập. Xem [protocol](LONG64_PROTOCOL.vi.md).
+
+Chạy lại fresh bằng cell sau. Không đặt ZIPfailedb1d0b34e vàoRESUME_ROOT; output cũ được giữ nguyên.
 
 ```python
-# Kaggle: GPU T4 x2, Internet ON. Cell độc lập; draft → verify bình thường.
+# Draft64 + canonical guard trước commit. Kaggle: T4 x2, Internet ON.
 import hashlib
 import urllib.request
 
-REVISION = "b1d0b34e41b23b0748d202a26a0105b65a236066"
-EXPECTED_SHA256 = "373e6cab1120a1a503ea195cc5d3afad1da08d164b24b8ce1ac1bf4d0cd093d1"
+REVISION = "39890af682c068a51f5788594195f86e79a28575"
+EXPECTED_SHA256 = "0c0b14f198b6b4090268e691379fbdfbbbd6149ad5034534c89a8b86dafb36e9"
 COUNT_PER_DATASET = 100
 MAX_NEW_TOKENS = 256
-RESUME_ROOT = None  # Chỉ dùng ZIP/folder checkpoint B64 khi cần resume.
+RESUME_ROOT = None  # Bắt đầu mới; ZIP B64 cũ bị lỗi không tương thích mode này.
 
 url = (
     "https://raw.githubusercontent.com/HoangMaizzz/speculative-world-model/"
     + REVISION + "/scripts/kaggle_long64_cell.py"
 )
-print("Loading pinned draft64 launcher:", REVISION, flush=True)
+print("Loading guarded draft64 launcher:", REVISION, flush=True)
 with urllib.request.urlopen(url, timeout=60) as response:
     source = response.read()
 if hashlib.sha256(source).hexdigest() != EXPECTED_SHA256:
@@ -35,7 +37,6 @@ scope = {
 exec(compile(source, url, "exec"), scope)
 ```
 
-ZIP mặc định: `/kaggle/working/long64/long64_checkpoint.zip`. Có log, heartbeat, SQLite mỗi round, ZIP định kỳ và sau mỗi prompt; soft budget6giờ có thể resume. Session mới upload ZIPB64, đặt `RESUME_ROOT` tới ZIP/folder đã unzip; không dùng ZIPB60/Test4.
+ZIP mới: `/kaggle/working/long64_guarded/long64_checkpoint.zip` (hoặc revision-suffixed folder được in trong log). Lưurawparallelfeedback,canonicalcheckedrows,extra forwards,numerical_disagreements.csv,allB64drafts/traces,canonicalaudit và shiftedspans/bridgesCSV/JSON/HTML.
 
-Không cần input ZIP cũ để bắt đầu hoặc GitHub token. Preflight kiểm model thật trước Main; GPU results B64 chưa có ở lúc phát hành. Phân tích offline dùng horizon63, shifts±8/16/32/63; các runs và bridges có rawIDs/CSV/JSON/HTML.
-
+SQLite mỗi round,ZIP180s+prompt/final,soft6h budget. Session mới chỉresumeZIP cùngrevision/config/mode. Mọi mismatch độc lập còn lại vẫn làm fail và giữevidence; không có gold substitution/INT8/offload. Local171tests pass; chưa có pretrainedT4run của fix tại lúc publish.
