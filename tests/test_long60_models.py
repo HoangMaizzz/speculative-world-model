@@ -11,6 +11,53 @@ AVAILABLE = importlib.util.find_spec("torch") is not None and importlib.util.fin
 
 @unittest.skipUnless(AVAILABLE, "Optional local CPU model dependencies missing")
 class Long60ModelTests(unittest.TestCase):
+    def test_guarded_actual_target_kv_survives_deliberately_wrong_parallel_rows(self):
+        import torch
+        from transformers import Qwen2Config, Qwen2ForCausalLM
+        from suffix_lab.runtime import ARSession
+        from suffix_lab.long60 import ParallelVerifier
+        from suffix_lab.canonical_guard import GuardedVerifier
+        from suffix_lab.long60_plan import decide
+        torch.set_num_threads(1)
+        torch.manual_seed(123)
+        c = Qwen2Config(vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                       num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=512)
+        c._attn_implementation = "sdpa"
+        model = Qwen2ForCausalLM(c).eval()
+        class WrongParallel(ParallelVerifier):
+            def score(self, prefix, proposal):
+                f = super().score(prefix, proposal)
+                f["top1_with_bonus"] = [(t+1) % 64 for t in f["top1_with_bonus"]]
+                return f
+        guard = GuardedVerifier(WrongParallel(model), set())
+        prompt, output = [1, 2, 3, 4, 5], []
+        canonical = ARSession(model).draft(prompt, 140).tokens
+        guard.begin_prompt(prompt, [])
+        for length in (64, 64):
+            proposal = canonical[len(output):len(output)+length]
+            f = guard.score(prompt+output, proposal)
+            commit = decide(proposal, f["top1_with_bonus"], set(), 200)["committed_tokens"]
+            output.extend(commit)
+            self.assertTrue(f["canonical_guard"]["numerical_disagreements"])
+        self.assertEqual(output, canonical[:130])
+        guard.begin_prompt(prompt, output[:70])
+        f = guard.score(prompt+output[:70], canonical[70:134])
+        self.assertEqual(decide(canonical[70:134], f["top1_with_bonus"], set(), 200)["committed_tokens"], canonical[70:135])
+
+    def test_guarded_cursor_rejects_noncanonical_resume_prefix(self):
+        import torch
+        from transformers import Qwen2Config, Qwen2ForCausalLM
+        from suffix_lab.canonical_guard import CanonicalCursor
+        torch.set_num_threads(1)
+        c = Qwen2Config(vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                       num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=512)
+        model = Qwen2ForCausalLM(c).eval()
+        cursor = CanonicalCursor(model, set())
+        cursor.begin([1, 2, 3], [])
+        token, _ = cursor.prediction()
+        with self.assertRaisesRegex(AssertionError, "not canonical"):
+            cursor.begin([1, 2, 3], [(token+1) % 64])
+
     def test_real_qwen_parallel_bonus_and_causal_future(self):
         import torch
         from transformers import Qwen2Config, Qwen2ForCausalLM

@@ -38,6 +38,11 @@ def report(output, store, c, tokenizer=None):
         return "".join(pieces.get(str(t), f"<ID:{t}>") for t in ids)
     completed = {p["id"] for p in prompts}
     audited_rounds = [r for r in rounds if r["prompt_id"] in completed]
+    numerical_rows = []
+    for r in rounds:
+        for item in r["verification"].get("canonical_guard", {}).get("numerical_disagreements", []):
+            numerical_rows.append({"round_id": r["id"], "prompt_id": r["prompt_id"],
+                                   "output_position": r["offset"]+item["position"], **item})
     eligible = [d for d in diagnostics if not d["terminal_correction"] and d["old"] and d["reference"]]
     summaries = []
     for ds in c["datasets"]+["pooled"]:
@@ -89,6 +94,11 @@ def report(output, store, c, tokenizer=None):
     summary = json.loads((output/"summary.json").read_text(encoding="utf-8"))
     hits = [d for d in eligible if d["runs"]]
     summary.update(best_shift_histogram=dict(Counter(d["runs"][0]["delta"] for d in hits)),
+                   verification_mode=c.get("verification_mode", "parallel"),
+                   canonical_guard_extra_forwards=sum(r["verification"].get("canonical_guard", {}).get("new_forwards", 0)+
+                       r["verification"].get("canonical_prefix_replay", {}).get("forwards", 0) for r in rounds),
+                   numerical_disagreement_rows=len(numerical_rows),
+                   numerical_disagreement_rounds=len({r["round_id"] for r in numerical_rows}),
                    best_length_histogram=dict(Counter(d["runs"][0]["length"] for d in hits)),
                    chain_block_length_histogram=dict(Counter(r["length"] for d in eligible for r in d["chain"])),
                    eligible_C0=sum(d["C0"] for d in eligible),
@@ -101,10 +111,16 @@ def report(output, store, c, tokenizer=None):
     write_csv(output/"bridges.csv", ["event_id", "prompt_id", "dataset", "bridge_index", "source_length",
               "target_length", "delta_before", "delta_after", "source_start", "destination_start", "source_text", "target_text"], bridge_rows)
     write_csv(output/"prompts.csv", ["id", "dataset", "rounds", "terminated", "canonical_audit_passed"], prompts)
+    write_csv(output/"numerical_disagreements.csv", ["round_id", "prompt_id", "output_position", "position",
+              "parallel_token", "canonical_token", "parallel_logit_margin", "canonical_logit_margin"], numerical_rows)
     lines = [f"# Native draft{length} → AR: online generation and offline shift diagnostics", "",
              f"Audited prompts: {len(prompts)}/{c['prompts_per_dataset']*len(c['datasets'])}. "
              f"Audited/saved rounds: {len(audited_rounds)}/{len(rounds)}.", "",
              f"Draft length{length}; output cap{c['max_new_tokens']}; fixed FP16 target split18/10 layers on GPU0/GPU1; dLLM on GPU1.", "",
+             f"Verification mode: {c.get('verification_mode', 'parallel')}. "
+             f"Canonical guard extra forwards: {summary['canonical_guard_extra_forwards']}; "
+             f"parallel/canonical differing checked rows: {len(numerical_rows)}. "
+             "Guarded mode adds serial target computation before commit and is not a one-pass speed benchmark.", "",
              "| Dataset | Radius | Eligible rejections | Any run≥4 | ≥2 blocks | ≥3 blocks | Mean longest when found |", "|---|---:|---:|---:|---:|---:|---:|"]
     for r in summaries:
         avg = "NA" if r["mean_longest_given_hit"] is None else f"{r['mean_longest_given_hit']:.2f}"

@@ -24,6 +24,7 @@ def validate_config(c):
     if (c["draft_length"] not in (60, 64) or c["diagnostic_horizon"] != c["draft_length"]-1
             or c["target_precision"] != "fp16" or c["physical_block_size"] != 32
             or c["subblock_size"] != 8 or c["minimum_run"] < 2
+            or c.get("verification_mode", "parallel") not in ("parallel", "canonical_guarded")
             or c["reference_lookahead"] < c["draft_length"]+c["diagnostic_horizon"]
             or max(c["shift_radii"]) != c["diagnostic_horizon"] or min(c["shift_radii"]) < 1
             or not 1 <= c["prompts_per_dataset"] <= 100 or c["max_new_tokens"] < 1
@@ -111,7 +112,9 @@ def load_bundle(c, output):
     length, tag = c["draft_length"], f"long{c['draft_length']}"
     audit = {"passed": False, "target": target_consistency(ar, prefix, length), "dllm": []}
     atomic_json(output/"preflight.json", audit)
-    if not audit["target"]["passed"]:
+    guarded = c.get("verification_mode", "parallel") == "canonical_guarded"
+    target_pass = (audit["target"]["repeatable"] and audit["target"]["causal_tail_equal"]) if guarded else audit["target"]["passed"]
+    if not target_pass:
         raise AssertionError(f"B{length} target cached/parallel consistency failed; preflight.json preserves evidence")
     model = load_model(paths[DLLM], "cuda:1", precision="fp16")
     drafter = DLLMDrafter(model, c)
@@ -128,12 +131,26 @@ def load_bundle(c, output):
         eos.update(value if isinstance(value, (list, tuple)) else [] if value is None else [value])
     if not eos or c["mask_id"] in eos:
         raise ValueError("Invalid EOS/MASK identity")
+    verifier = ParallelVerifier(target)
+    if guarded:
+        from .canonical_guard import GuardedVerifier
+        verifier = GuardedVerifier(verifier, eos)
+        canonical_tokens = ar.draft(prefix, length+1, eos).tokens
+        candidate = until_eos(canonical_tokens[:length], eos)
+        verifier.begin_prompt(prefix, [])
+        feedback = verifier.score(prefix, candidate)
+        commit = decide(candidate, feedback["top1_with_bonus"], eos, length+1)["committed_tokens"]
+        if commit != canonical_tokens[:len(commit)]:
+            raise AssertionError("Online canonical guard failed independent target preflight")
+        audit["guarded_verification"] = {"passed": True, "extra_target_forwards": feedback["forwards"]-1,
+                                         "disagreements": feedback["canonical_guard"]["numerical_disagreements"]}
     audit.update(passed=True, effective_eos_ids=sorted(eos))
     atomic_json(output/"preflight.json", audit)
     runtime = {"environment": environment(), "models": revisions,
                "target_device_map": {k: str(v) for k, v in target.hf_device_map.items()},
                "target_precision": "fp16", "drafter_device": "cuda:1", "memory": memory(),
                "tokenizer": tokenizer_evidence, "effective_eos_ids": sorted(eos),
+               "verification_mode": c.get("verification_mode", "parallel"),
                "latency_study": False, "operational_wall_includes_peer_transfers": True}
     previous_runtime = output/"runtime.json"
     if previous_runtime.exists():
@@ -143,8 +160,12 @@ def load_bundle(c, output):
             error.evidence = {"previous": numerical_identity(previous), "current": numerical_identity(runtime)}
             raise error
     atomic_json(output/"runtime.json", runtime)
-    return SimpleNamespace(tokenizer=tokenizer, drafter=drafter, verifier=ParallelVerifier(target), eos=eos,
-                           canonical=lambda p, n: asdict(ar.draft(p, n, eos)))
+    def canonical(p, n):
+        result = asdict(ar.draft(p, n, eos))
+        # ARSession's default untimed label assumes one device; this model is sharded.
+        result["stats"]["latency_policy"] = "operational_wall_including_peer_transfers_no_speedup_claim"
+        return result
+    return SimpleNamespace(tokenizer=tokenizer, drafter=drafter, verifier=verifier, eos=eos, canonical=canonical)
 
 
 def generate_prompt(prompt, ids, c, store, bundle, boundary, checkpoint):
@@ -162,6 +183,10 @@ def generate_prompt(prompt, ids, c, store, bundle, boundary, checkpoint):
         emitted.extend(row["decision"]["committed_tokens"])
         if emitted[-1] in bundle.eos and index != len(previous)-1:
             raise ValueError("Checkpoint has rounds after EOS")
+    if c.get("verification_mode", "parallel") == "canonical_guarded":
+        if not hasattr(bundle.verifier, "begin_prompt"):
+            raise ValueError("Guarded mode requires a canonical verifier cursor")
+        bundle.verifier.begin_prompt(ids, emitted)
     while len(emitted) < c["max_new_tokens"] and not (emitted and emitted[-1] in bundle.eos):
         boundary()
         offset, index = len(emitted), len(previous)
@@ -177,6 +202,9 @@ def generate_prompt(prompt, ids, c, store, bundle, boundary, checkpoint):
         store.put("meta", "active", {"phase": f"verify{length}", "id": key})
         feedback = bundle.verifier.score(prefix, proposal)
         decision = decide(proposal, feedback["top1_with_bonus"], bundle.eos, c["max_new_tokens"]-offset)
+        disagreements = feedback.get("canonical_guard", {}).get("numerical_disagreements", [])
+        if disagreements:
+            print(f"[{tag} numerical guard] {key} parallel/canonical differing rows={len(disagreements)}", flush=True)
         row = {"id": key, "prompt_id": prompt["id"], "dataset": prompt["dataset"],
                "round_index": index, "offset": offset, "prefix_digest": digest(prefix),
                "draft": draft, "proposal": proposal, "verification": feedback, "decision": decision}
@@ -205,7 +233,13 @@ def audit_and_diagnose(prompt, ids, emitted, rounds, c, store, bundle):
     gold = reference["tokens"]
     if gold[:len(emitted)] != emitted:
         mismatch = next((i for i, (x, y) in enumerate(zip(emitted, gold)) if x != y), min(len(emitted), len(gold)))
-        raise AssertionError(f"Actual online output differs from canonical greedy target at {key}:{mismatch}; no gold substitution")
+        owner = next((r for r in rounds if r["offset"] <= mismatch < r["offset"]+len(r["decision"]["committed_tokens"])), None)
+        error = AssertionError(f"Actual online output differs from canonical greedy target at {key}:{mismatch}; no gold substitution")
+        error.evidence = {"prompt_id": key, "position": mismatch,
+                          "online_token": emitted[mismatch] if mismatch < len(emitted) else None,
+                          "canonical_token": gold[mismatch] if mismatch < len(gold) else None,
+                          "round": owner}
+        raise error
     for row in rounds:
         proposal = row["proposal"]
         future = gold[row["offset"]:row["offset"]+len(proposal)]

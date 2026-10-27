@@ -14,6 +14,7 @@
   "mask_id": 151665,
   "target_precision": "fp16",
   "target_attention": "sdpa",
+  "verification_mode": "canonical_guarded",
   "target_gpu0_layers": 18,
   "allow_fp16_reduced_precision_reduction": false,
   "shift_radii": [8, 16, 32, 63],

@@ -40,18 +40,20 @@ def launch(revision, count=100, max_new_tokens=256, resume_root=None):
         stamp.write_text(revision)
     child_env = helpers["child_environment"]()
     print("[long64] CPU correctness/resume tests before pretrained models", flush=True)
-    code = stream([str(python), "-u", "-m", "unittest", "discover", "-s", str(repo/"tests"),
-                   "-p", "test_long6[04].py", "-q"], cwd=repo, env=child_env, log_path=work/"long64_checks.log")
-    if code:
-        raise RuntimeError("B64 CPU checks failed; pretrained experiment was not started")
-    output = work/"long64"
+    for pattern in ("test_long6[04].py", "test_canonical_guard.py"):
+        code = stream([str(python), "-u", "-m", "unittest", "discover", "-s", str(repo/"tests"),
+                       "-p", pattern, "-q"], cwd=repo, env=child_env, log_path=work/"long64_checks.log")
+        if code:
+            raise RuntimeError("B64 CPU checks failed; pretrained experiment was not started")
+    output = work/"long64_guarded"
     manifest = output/"long64-manifest.json"
     if manifest.exists():
         old = json.loads(manifest.read_text())
         if (old["code_revision"] != revision or old["config"]["prompts_per_dataset"] != count
                 or old["config"]["max_new_tokens"] != max_new_tokens):
-            output = work/f"long64_{revision[:12]}_{count}_{max_new_tokens}"
+            output = work/f"long64_guarded_{revision[:12]}_{count}_{max_new_tokens}"
     print(f"[long64] {count} MATH + {count} GSM8K; draft64; strict1MASK/forward; FP16 two GPUs", flush=True)
+    print("[long64] Numerical audit mode: parallel verification + actual canonical KV guard before commit; extra target forwards are recorded.", flush=True)
     print("[long64] Output:", output, "resume:", resume_root or "local checkpoint / fresh", flush=True)
     args = [str(python), "-u", "-m", "suffix_lab.long64", "--output", str(output), "--revision", revision,
             "--count", str(count), "--max-new-tokens", str(max_new_tokens)]

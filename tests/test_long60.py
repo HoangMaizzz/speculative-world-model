@@ -50,7 +50,8 @@ def bundle(clock=None):
         return {"tokens": list(range(len(p), len(p)+n)), "stats": {"total_forwards": n}}
     return SimpleNamespace(tokenizer=Tokenizer(), drafter=Drafter(clock), eos=EOS,
         canonical=canonical,
-        verifier=SimpleNamespace(score=lambda p, t: {"top1_with_bonus": list(range(len(p), len(p)+len(t)+1)), "forwards": 1}))
+        verifier=SimpleNamespace(begin_prompt=lambda p, t: None,
+                                 score=lambda p, t: {"top1_with_bonus": list(range(len(p), len(p)+len(t)+1)), "forwards": 1}))
 
 
 def config():
