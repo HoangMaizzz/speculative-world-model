@@ -76,7 +76,9 @@ Resume cùng thư mục: chạy lại cell tương ứng hoặc `run`. Resume ph
 
 ## Source
 
-Draft60 online SD (100 MATH +100 GSM8K, dLLM→AR, FP16 T4x2): [protocol](docs/LONG60_PROTOCOL.vi.md) and [standalone Kaggle cell](docs/KAGGLE_LONG60.md). This run records actual multi-round correction/bonus decisions, then independently audits canonical output and analyzes shifted runs/bridges offline. No old pilot ZIP is required.
+Draft64 ordinary SD (current requested run, 100 MATH +100 GSM8K, FP16 T4x2): [protocol](docs/LONG64_PROTOCOL.vi.md), [standalone cell](docs/KAGGLE_LONG64.md), [notebook](notebooks/long64.ipynb). Every round drafts 64 fresh tokens, verifies, commits accepted prefix plus correction/bonus, and discards the remainder. No fixed anchors or suffix extension. Shifted spans/bridges are offline diagnostics only.
+
+Draft60 online SD (previous variant): [protocol](docs/LONG60_PROTOCOL.vi.md) and [standalone Kaggle cell](docs/KAGGLE_LONG60.md). Its pinned revision remains available; B60 and B64 checkpoints cannot be mixed.
 
 - `core.py`: strict Top-1, một MASK mỗi bước, absolute physical32/active8, hard KEEP.
 - `runtime.py`: target/AR greedy, shifted feedback, reviewed Fast-dLLM cache provider, real GPU preflight.
