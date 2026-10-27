@@ -24,16 +24,17 @@ class Long60ModelTests(unittest.TestCase):
         config._attn_implementation = "sdpa"
         model = Qwen2ForCausalLM(config).eval()
         prefix = [1, 2, 3, 4, 5]
-        gold = ARSession(model).draft(prefix, 61).tokens
         scorer = ParallelVerifier(model)
-        result = scorer.score(prefix, gold[:60])
-        self.assertEqual(result["top1_with_bonus"], gold)
-        self.assertEqual(decide(gold[:60], result["top1_with_bonus"], set(), 100)["committed_tokens"], gold)
-        changed = list(gold[:60])
-        changed[-1] = (changed[-1]+1) % 64
-        feedback = scorer.score(prefix, changed)
-        self.assertEqual(feedback["top1_with_bonus"][:60], gold[:60])
-        self.assertEqual(decide(changed, feedback["top1_with_bonus"], set(), 100)["first_rejection"], 59)
+        for length in (60, 64):
+            gold = ARSession(model).draft(prefix, length+1).tokens
+            result = scorer.score(prefix, gold[:length])
+            self.assertEqual(result["top1_with_bonus"], gold)
+            self.assertEqual(decide(gold[:length], result["top1_with_bonus"], set(), 100)["committed_tokens"], gold)
+            changed = list(gold[:length])
+            changed[-1] = (changed[-1]+1) % 64
+            feedback = scorer.score(prefix, changed)
+            self.assertEqual(feedback["top1_with_bonus"][:length], gold[:length])
+            self.assertEqual(decide(changed, feedback["top1_with_bonus"], set(), 100)["first_rejection"], length-1)
 
     def test_official_diffusion_sixty_cached_full(self):
         import torch
@@ -59,11 +60,12 @@ class Long60ModelTests(unittest.TestCase):
                              {"physical_block_size": 32, "subblock_size": 8, "mask_id": 62})
         for phase in (0, 1, 7, 8, 31):
             prefix = [1+i % 50 for i in range(32+phase)]
-            cached = asdict(drafter.draft(prefix, 60))
-            full = asdict(drafter.draft(prefix, 60, use_prefix_cache=False))
-            self.assertEqual(cached["tokens"], full["tokens"])
-            validate_draft(cached, 60, prefix)
-            self.assertEqual(cached["stats"]["unmask_forwards"], 60)
+            for length in (60, 64):
+                cached = asdict(drafter.draft(prefix, length))
+                full = asdict(drafter.draft(prefix, length, use_prefix_cache=False))
+                self.assertEqual(cached["tokens"], full["tokens"])
+                validate_draft(cached, length, prefix)
+                self.assertEqual(cached["stats"]["unmask_forwards"], length)
 
 
 if __name__ == "__main__":

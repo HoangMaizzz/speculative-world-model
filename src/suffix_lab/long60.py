@@ -1,4 +1,4 @@
-"""Online dLLM60 -> AR greedy SD, followed by independent offline diagnostics."""
+"""Shared native B60/B64 online SD engine; diagnostics stay strictly post-hoc."""
 import argparse
 from dataclasses import asdict
 import gc
@@ -21,14 +21,14 @@ class BudgetReached(Exception):
 
 
 def validate_config(c):
-    if (c["draft_length"] != 60 or c["diagnostic_horizon"] != 59
+    if (c["draft_length"] not in (60, 64) or c["diagnostic_horizon"] != c["draft_length"]-1
             or c["target_precision"] != "fp16" or c["physical_block_size"] != 32
             or c["subblock_size"] != 8 or c["minimum_run"] < 2
             or c["reference_lookahead"] < c["draft_length"]+c["diagnostic_horizon"]
-            or max(c["shift_radii"]) != 59 or min(c["shift_radii"]) < 1
+            or max(c["shift_radii"]) != c["diagnostic_horizon"] or min(c["shift_radii"]) < 1
             or not 1 <= c["prompts_per_dataset"] <= 100 or c["max_new_tokens"] < 1
             or c["soft_budget_seconds"] <= 0 or c["zip_interval_seconds"] <= 0):
-        raise ValueError("Invalid fixed B60/FP16/native geometry or diagnostic configuration")
+        raise ValueError("Invalid B60/B64 FP16/native geometry or diagnostic configuration")
 
 
 def prepare_prompts(c):
@@ -108,18 +108,19 @@ def load_bundle(c, output):
     ar = ARSession(target)
     prefix = tokenizer.apply_chat_template([{"role": "user", "content": "Compute 17 + 28. Explain briefly."}],
                                            tokenize=True, add_generation_prompt=True)
-    audit = {"passed": False, "target": target_consistency(ar, prefix, 60), "dllm": []}
+    length, tag = c["draft_length"], f"long{c['draft_length']}"
+    audit = {"passed": False, "target": target_consistency(ar, prefix, length), "dllm": []}
     atomic_json(output/"preflight.json", audit)
     if not audit["target"]["passed"]:
-        raise AssertionError("B60 target cached/parallel consistency failed; preflight.json preserves evidence")
+        raise AssertionError(f"B{length} target cached/parallel consistency failed; preflight.json preserves evidence")
     model = load_model(paths[DLLM], "cuda:1", precision="fp16")
     drafter = DLLMDrafter(model, c)
     for phase in (0, 1, 7, 8, 31):
         p = prefix+[prefix[-1]]*((phase-len(prefix)) % 32)
-        print(f"[long60 preflight] native B60 cached/full phase={phase}", flush=True)
-        result = audited_draft(drafter, p, 60, {})
-        validate_draft(result, 60, p)
-        audit["dllm"].append({"phase": phase, "cached_full_equal": True, "unmask_forwards": 60})
+        print(f"[{tag} preflight] native B{length} cached/full phase={phase}", flush=True)
+        result = audited_draft(drafter, p, length, {})
+        validate_draft(result, length, p)
+        audit["dllm"].append({"phase": phase, "cached_full_equal": True, "unmask_forwards": length})
         atomic_json(output/"preflight.json", audit)
     eos = set()
     for obj in (tokenizer, target.config, target.generation_config, model.config, model.generation_config):
@@ -147,6 +148,7 @@ def load_bundle(c, output):
 
 
 def generate_prompt(prompt, ids, c, store, bundle, boundary, checkpoint):
+    length, tag = c["draft_length"], f"long{c['draft_length']}"
     previous = sorted([r for r in store.rows("round") if r["prompt_id"] == prompt["id"]], key=lambda r: r["round_index"])
     emitted = []
     for index, row in enumerate(previous):
@@ -167,12 +169,12 @@ def generate_prompt(prompt, ids, c, store, bundle, boundary, checkpoint):
         prefix = ids+emitted
         if len(prefix)+c["draft_length"] > c["context_limit"]:
             raise ValueError("Context limit; prompt/output was not silently truncated")
-        store.put("meta", "active", {"phase": "draft60", "id": key, "output_tokens": offset})
-        print(f"[long60 round] {key} output={offset}/{c['max_new_tokens']} drafting 60 MASKs", flush=True)
-        draft = asdict(bundle.drafter.draft(prefix, 60, anchors={}))
-        validate_draft(draft, 60, prefix)
+        store.put("meta", "active", {"phase": f"draft{length}", "id": key, "output_tokens": offset})
+        print(f"[{tag} round] {key} output={offset}/{c['max_new_tokens']} drafting {length} MASKs", flush=True)
+        draft = asdict(bundle.drafter.draft(prefix, length, anchors={}))
+        validate_draft(draft, length, prefix)
         proposal = until_eos(draft["tokens"], bundle.eos)
-        store.put("meta", "active", {"phase": "verify60", "id": key})
+        store.put("meta", "active", {"phase": f"verify{length}", "id": key})
         feedback = bundle.verifier.score(prefix, proposal)
         decision = decide(proposal, feedback["top1_with_bonus"], bundle.eos, c["max_new_tokens"]-offset)
         row = {"id": key, "prompt_id": prompt["id"], "dataset": prompt["dataset"],
@@ -181,7 +183,7 @@ def generate_prompt(prompt, ids, c, store, bundle, boundary, checkpoint):
         store.put("round", key, row)
         emitted.extend(decision["committed_tokens"])
         previous.append(row)
-        print(f"[long60 verified] {key} accepted={decision['accepted_draft']}/{len(proposal)} "
+        print(f"[{tag} verified] {key} accepted={decision['accepted_draft']}/{len(proposal)} "
               f"emitted={len(decision['committed_tokens'])} total={len(emitted)}", flush=True)
         clear_unused()
         checkpoint()
@@ -196,7 +198,7 @@ def audit_and_diagnose(prompt, ids, emitted, rounds, c, store, bundle):
         n = c["max_new_tokens"]+c["reference_lookahead"]
         if len(ids)+n > c["context_limit"]:
             raise ValueError("Canonical lookahead exceeds context limit")
-        print(f"[long60 audit] {key} independent target-only canonical generation, up to {n} tokens", flush=True)
+        print(f"[long{c['draft_length']} audit] {key} independent target-only canonical generation, up to {n} tokens", flush=True)
         result = bundle.canonical(ids, n)
         reference = {"id": key, "prompt_ids": ids, "tokens": result["tokens"], "stats": result["stats"]}
         store.put("reference", key, reference)
@@ -219,21 +221,24 @@ def audit_and_diagnose(prompt, ids, emitted, rounds, c, store, bundle):
 
 
 def pack(output, store=None):
+    identity = (store.get("meta", "identity") or {}) if store else {}
+    tag = f"long{identity.get('config', {}).get('draft_length', 60)}"
     if store:
         store.backup(output/"checkpoint.sqlite")
         for kind in ("round", "prompt", "reference", "diagnostic"):
             store.export(kind, output/(kind+"s.jsonl"))
-    archive, temp = output/"long60_checkpoint.zip", output/"long60_checkpoint.tmp"
+    archive, temp = output/(tag+"_checkpoint.zip"), output/(tag+"_checkpoint.tmp")
     with zipfile.ZipFile(temp, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(output.rglob("*")):
-            if p.is_file() and p not in (archive, temp) and not p.name.startswith("long60.sqlite"):
+            if p.is_file() and p not in (archive, temp) and not p.name.startswith(("long60.sqlite", "long64.sqlite")):
                 z.write(p, p.relative_to(output).as_posix())
     temp.replace(archive)
     return archive
 
 
 def restore(root, output, identity):
-    database = output/"long60.sqlite"
+    tag = f"long{identity.get('config', {}).get('draft_length', 60)}"
+    database = output/(tag+".sqlite")
     if not root:
         return
     if database.exists():
@@ -246,9 +251,9 @@ def restore(root, output, identity):
         data = files[0].read_bytes()
         artifacts = {name: (files[0].parent/name).read_bytes() for name in preserved if (files[0].parent/name).exists()}
     else:
-        archives = [root] if root.is_file() else list(root.rglob("long60_checkpoint.zip"))
+        archives = [root] if root.is_file() else list(root.rglob(tag+"_checkpoint.zip"))
         if len(archives) != 1:
-            raise ValueError("Resume root must identify one B60 checkpoint, not an older experiment")
+            raise ValueError(f"Resume root must identify one {tag} checkpoint, not an older experiment")
         with zipfile.ZipFile(archives[0]) as z:
             data = z.read("checkpoint.sqlite")
             artifacts = {name: z.read(name) for name in preserved if name in z.namelist()}
@@ -270,15 +275,16 @@ def restore(root, output, identity):
 
 def execute(output, revision, c, resume_root=None):
     validate_config(c)
+    tag = f"long{c['draft_length']}"
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     lock = json.loads((ROOT/"source-lock.json").read_text())
-    identity = {"protocol": "online-dllm60-ar-shift-diagnostics-v1", "code_revision": revision,
+    identity = {"protocol": f"online-dllm{c['draft_length']}-ar-shift-diagnostics-v1", "code_revision": revision,
                 "source_digest": source_digest(), "config": c,
                 "models": {k: lock["models"][k] for k in (TARGET, DLLM)}, "datasets": lock["datasets"]}
     restore(resume_root, output, identity)
-    store = Store(output/"long60.sqlite", identity)
-    atomic_json(output/"long60-manifest.json", identity)
+    store = Store(output/(tag+".sqlite"), identity)
+    atomic_json(output/(tag+"-manifest.json"), identity)
     started = time.monotonic()
     last_zip = started
     status, bundle, report_error = "failed", None, None
@@ -305,7 +311,7 @@ def execute(output, revision, c, resume_root=None):
                 if store.get("prompt", prompt["id"]):
                     continue
                 boundary()
-                print(f"[long60 prompt] {i+1}/{len(plan)} {prompt['id']}", flush=True)
+                print(f"[{tag} prompt] {i+1}/{len(plan)} {prompt['id']}", flush=True)
                 ids = bundle.tokenizer.apply_chat_template([{"role": "user", "content": prompt["question"]}],
                                                            tokenize=True, add_generation_prompt=True)
                 emitted, rounds = generate_prompt(prompt, ids, c, store, bundle, boundary, checkpoint)
@@ -320,7 +326,7 @@ def execute(output, revision, c, resume_root=None):
         status = "complete"
     except BudgetReached:
         status = "budget_checkpoint"
-        print("[long60] Soft wall budget reached; completed rounds are resumable", flush=True)
+        print(f"[{tag}] Soft wall budget reached; completed rounds are resumable", flush=True)
     except BaseException as error:
         atomic_json(output/"failure.json", {"type": type(error).__name__, "message": str(error),
                     "traceback": traceback.format_exc(), "active": store.get("meta", "active"),
@@ -345,7 +351,7 @@ def execute(output, revision, c, resume_root=None):
         bundle = None
         clear_unused()
     if report_error is not None:
-        raise RuntimeError("B60 report export failed; raw checkpoint is preserved") from report_error
+        raise RuntimeError(f"{tag} report export failed; raw checkpoint is preserved") from report_error
     return status
 
 

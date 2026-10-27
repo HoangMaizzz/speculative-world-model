@@ -1,0 +1,21 @@
+{
+  "seed": 42,
+  "datasets": ["gsm8k", "math500"],
+  "prompts_per_dataset": 100,
+  "draft_length": 64,
+  "max_new_tokens": 256,
+  "diagnostic_horizon": 63,
+  "reference_lookahead": 128,
+  "context_limit": 4096,
+  "soft_budget_seconds": 21600,
+  "zip_interval_seconds": 180,
+  "physical_block_size": 32,
+  "subblock_size": 8,
+  "mask_id": 151665,
+  "target_precision": "fp16",
+  "target_attention": "sdpa",
+  "target_gpu0_layers": 18,
+  "allow_fp16_reduced_precision_reduction": false,
+  "shift_radii": [8, 16, 32, 63],
+  "minimum_run": 4
+}

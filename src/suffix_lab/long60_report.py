@@ -15,6 +15,7 @@ def write_csv(path, fields, rows):
 
 
 def report(output, store, c, tokenizer=None):
+    length = c["draft_length"]
     rounds, prompts, diagnostics = store.rows("round"), store.rows("prompt"), store.rows("diagnostic")
     pieces_path = output/"token_pieces.json"
     pieces = json.loads(pieces_path.read_text(encoding="utf-8")) if pieces_path.exists() else {}
@@ -81,8 +82,8 @@ def report(output, store, c, tokenizer=None):
         "bridge_count": len(bridge_rows), "limits": [
             "Post-hoc exact matches are oracle candidates; no retrieved spans were committed.",
             "Rounds of one prompt are correlated; event rates are descriptive, not independent trials.",
-            "Native physical32/active8, 60 one-MASK forwards even when a logical proposal ends early at EOS.",
-            "Fixed draft60 may exceed final remaining output budget; accepted count includes un-emitted verified draft tokens.",
+            f"Native physical32/active8, {length} one-MASK forwards even when a logical proposal ends early at EOS.",
+            f"Fixed draft{length} may exceed final remaining output budget; accepted count includes un-emitted verified draft tokens.",
             "Chain optimizes only enumerated maximal runs, not every partial alignment.",
             "Operational wall includes transfers/setup/audits; no end-to-end speedup or task-accuracy claim."]})
     summary = json.loads((output/"summary.json").read_text(encoding="utf-8"))
@@ -100,10 +101,10 @@ def report(output, store, c, tokenizer=None):
     write_csv(output/"bridges.csv", ["event_id", "prompt_id", "dataset", "bridge_index", "source_length",
               "target_length", "delta_before", "delta_after", "source_start", "destination_start", "source_text", "target_text"], bridge_rows)
     write_csv(output/"prompts.csv", ["id", "dataset", "rounds", "terminated", "canonical_audit_passed"], prompts)
-    lines = ["# Native draft60 → AR: online generation and offline shift diagnostics", "",
+    lines = [f"# Native draft{length} → AR: online generation and offline shift diagnostics", "",
              f"Audited prompts: {len(prompts)}/{c['prompts_per_dataset']*len(c['datasets'])}. "
              f"Audited/saved rounds: {len(audited_rounds)}/{len(rounds)}.", "",
-             "Draft length60; output cap256 by default; fixed FP16 target split18/10 layers on GPU0/GPU1; dLLM on GPU1.", "",
+             f"Draft length{length}; output cap{c['max_new_tokens']}; fixed FP16 target split18/10 layers on GPU0/GPU1; dLLM on GPU1.", "",
              "| Dataset | Radius | Eligible rejections | Any run≥4 | ≥2 blocks | ≥3 blocks | Mean longest when found |", "|---|---:|---:|---:|---:|---:|---:|"]
     for r in summaries:
         avg = "NA" if r["mean_longest_given_hit"] is None else f"{r['mean_longest_given_hit']:.2f}"
@@ -117,7 +118,7 @@ def report(output, store, c, tokenizer=None):
               "No latency comparison: notebook/model setup, independent canonical audit and peer transfers remain in operational wall."]
     (output/"report.md").write_text("\n".join(lines)+"\n", encoding="utf-8")
     cases = sorted(eligible, key=lambda d: (-len(d["chain"]), -sum(r["length"] for r in d["chain"]), d["id"]))[:40]
-    page = ["<!doctype html><meta charset='utf-8'><title>Draft60 shifted spans</title>",
+    page = [f"<!doctype html><meta charset='utf-8'><title>Draft{length} shifted spans</title>",
             "<style>body{font:15px system-ui;max-width:1100px;margin:30px auto}pre{white-space:pre-wrap;background:#f4f4f4;padding:12px}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:5px}</style>",
             "<h1>Offline shifted-span candidates</h1><p>Oracle labels after independent canonical audit; not online retrieval success.</p>"]
     for d in cases:
