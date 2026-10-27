@@ -76,6 +76,8 @@ Resume cùng thư mục: chạy lại cell tương ứng hoặc `run`. Resume ph
 
 ## Source
 
+Draft60 online SD (100 MATH +100 GSM8K, dLLM→AR, FP16 T4x2): [protocol](docs/LONG60_PROTOCOL.vi.md) and [standalone Kaggle cell](docs/KAGGLE_LONG60.md). This run records actual multi-round correction/bonus decisions, then independently audits canonical output and analyzes shifted runs/bridges offline. No old pilot ZIP is required.
+
 - `core.py`: strict Top-1, một MASK mỗi bước, absolute physical32/active8, hard KEEP.
 - `runtime.py`: target/AR greedy, shifted feedback, reviewed Fast-dLLM cache provider, real GPU preflight.
 - `experiment.py`: paired states, balanced sampling, checkpoint/ZIP.
