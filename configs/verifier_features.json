@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "layers": [
+    7,
+    14,
+    21,
+    27
+  ],
+  "top_k": 16,
+  "micro_probe_steps": 0,
+  "shard_events": 32,
+  "smoke_events": 20,
+  "pilot_events": 500,
+  "expected_prompts": 200,
+  "expected_rounds": 4050,
+  "expected_events": 3847,
+  "expected_input_identity": "38f3f1f35a907bcf30bb582e5eb7240f8bb69c0bec4af09a5b794320881fdc11",
+  "smoke_max_old_replay_mismatches": 0,
+  "minimum_free_disk_gib": 14
+}
