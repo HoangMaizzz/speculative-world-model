@@ -1,0 +1,28 @@
+{
+  "passed": true,
+  "input_identity": "38f3f1f35a907bcf30bb582e5eb7240f8bb69c0bec4af09a5b794320881fdc11",
+  "rounds_checked": 4050,
+  "prompts": 200,
+  "eligible": 3847,
+  "datasets": {
+    "gsm8k": 1841,
+    "math500": 2006
+  },
+  "suffix_tokens": 200581,
+  "all_maximal_runs_including_zero": 18116,
+  "all_maximal_nonzero_runs": 17182,
+  "bridge_edges_between_compatible_maximal_runs": 23709,
+  "verified_correction_beyond_output_budget": 92,
+  "gpu_inference_performed": false,
+  "local_tests": {
+    "count": 191,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "seconds": 124.315,
+    "command": "python -m unittest discover -s tests -q",
+    "model_checks": "tiny random Qwen CPU mechanics, not pretrained FP16 GPU evidence"
+  },
+  "runtime_revision": "07ccc836489ce771d0152e468f030226bed6ec90",
+  "pretrained_collection_run_locally": false
+}
