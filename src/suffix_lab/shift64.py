@@ -1,6 +1,7 @@
 """Paired oracle shift-anchor B64 test on the completed guarded B64 cohort."""
 import argparse
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from dataclasses import asdict
 import hashlib
 import json
@@ -18,10 +19,22 @@ from .store import Store, atomic_json, digest
 
 INPUT_SHA = "fb7e1ea13a0b6f6fce9f20d22c5270ab2c54e70cf83c59f7b95b31b44cacafca"
 ARMS = ("fresh64", "positional64", "shifted64")
+INPUT_FILES = {
+    "runtime.json": "9d81faab13cc16a7f72eafcb8e68191aae7948e905086f4e877b087b6c9d9a20",
+    "execution_status.json": "6e71e5c6a6e2151b22484b17eeb77d85598778e2a9a809107f63c5d6746cdb2c",
+    "prompts.jsonl": "71a327a91d15ea46fa0a74d55f48a3fe576201073d6f3133463004a552775172",
+    "references.jsonl": "328d79846f6728052c25ac4b10917196293e73b1940cb114e5ef4b79710bbb63",
+    "rounds.jsonl": "e34dfc5ffb04f502cc14f94afe62935245303ff7d23d119499a7a7edb6e8a784",
+}
 
 
 def input_zip(root):
     root = Path(root)
+    if root.is_dir() and all((root/name).is_file() for name in INPUT_FILES):
+        for name, expected in INPUT_FILES.items():
+            if hashlib.sha256((root/name).read_bytes()).hexdigest() != expected:
+                raise ValueError(f"Extracted Long64 checkpoint differs: {name}")
+        return root
     paths = [root] if root.is_file() else sorted(root.rglob("long64_checkpoint.zip"))
     matches = [p for p in paths if hashlib.sha256(p.read_bytes()).hexdigest() == INPUT_SHA]
     if len(matches) != 1:
@@ -30,12 +43,15 @@ def input_zip(root):
 
 
 def make_plan(path):
-    with zipfile.ZipFile(path) as archive:
+    path = Path(path)
+    with (nullcontext(None) if path.is_dir() else zipfile.ZipFile(path)) as archive:
+        def read(name):
+            return (path/name).read_bytes() if archive is None else archive.read(name)
+
         def rows(name):
-            with archive.open(name + ".jsonl") as stream:
-                return [json.loads(line) for line in stream]
-        runtime = json.loads(archive.read("runtime.json"))
-        status = json.loads(archive.read("execution_status.json"))
+            return [json.loads(line) for line in read(name + ".jsonl").splitlines()]
+        runtime = json.loads(read("runtime.json"))
+        status = json.loads(read("execution_status.json"))
         prompts, refs, rounds = rows("prompts"), rows("references"), rows("rounds")
     eos = set(runtime["effective_eos_ids"])
     references = {r["id"]: r for r in refs}
