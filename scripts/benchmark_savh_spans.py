@@ -32,6 +32,13 @@ ARMS = {
     "attention_hidden": (48, "attention"),
 }
 TARGETS = (.70, .75, .80, .85, .90)
+BANDS = ("4", "5-6", "7+")
+PROFILES = {
+    "uniform": (0., 0., 0.),
+    "strict_long": (0., .03, .06),
+    "stricter_long": (0., .05, .10),
+    "prefer_long": (0., -.03, -.06),
+}
 SEED_LENGTH = 4
 BUDGET = 16
 
@@ -297,7 +304,6 @@ class Scorer:
     def __init__(self, model, channels, kind, device, cap):
         self.model, self.channels, self.kind = model, channels, kind
         self.device, self.cap = device, cap
-        self.calibration = None
 
     def encode(self, event):
         x = np.ascontiguousarray(event.features[:, :self.channels])
@@ -315,22 +321,17 @@ class Scorer:
         indices = torch.as_tensor(rows, device=self.device)[None]
         return self.model.score_rows(encoded, indices)[0].cpu().numpy()
 
-    def probability(self, logits, rows):
-        length = rows[:, 1] - rows[:, 0]
-        score, offsets = self.calibration
-        linear = logits * score + offsets[length - 4]
-        return 1 / (1 + np.exp(-np.clip(linear, -60, 60)))
+
+def probabilities(logits, rows, calibration):
+    slope, offsets = calibration
+    linear = logits * slope + offsets[rows[:, 1] - rows[:, 0] - 4]
+    return 1 / (1 + np.exp(-np.clip(linear, -60, 60)))
 
 
-@torch.inference_mode()
-def calibrate(scorer, events):
-    xs, ys = [], []
-    eye = np.eye(scorer.cap - 3)
-    for event in events:
-        rows = dense_rows(event.size, scorer.cap)
-        xs.append(np.column_stack((scorer.raw(scorer.encode(event), rows), eye[rows[:, 1] - rows[:, 0] - 4])))
-        ys.append(match_labels(event.oracle, rows))
-    x, y = np.concatenate(xs), np.concatenate(ys).astype(float)
+def calibrate(proposals, cap):
+    eye = np.eye(cap - 3)
+    x = np.concatenate([np.column_stack((p.logits, eye[p.rows[:, 1] - p.rows[:, 0] - 4])) for p in proposals])
+    y = np.concatenate([p.labels for p in proposals]).astype(float)
 
     def objective(weights):
         logits = x @ weights
@@ -342,7 +343,7 @@ def calibrate(scorer, events):
                    bounds=[(0, None)] + [(None, None)] * (x.shape[1] - 1))
     if not fit.success:
         raise ValueError(f"Calibration failed: {fit.message}")
-    scorer.calibration = fit.x[0], fit.x[1:]
+    return float(fit.x[0]), fit.x[1:]
 
 
 def synchronize(device):
@@ -351,7 +352,7 @@ def synchronize(device):
 
 
 @torch.inference_mode()
-def pipeline(scorer, event, route, cap, seeds, instrument=False):
+def pipeline(scorer, event, route, cap, seeds, instrument=False, policy=None):
     parts = {key: 0.0 for key in ("encode", "candidates", "score", "select")}
 
     def step(key, fn, *args):
@@ -378,33 +379,64 @@ def pipeline(scorer, event, route, cap, seeds, instrument=False):
         rows = step("candidates", dense_rows, event.size, cap if route == "dense" else SEED_LENGTH)
         logits = step("score", scorer.raw, encoded, rows)
         scored = len(rows)
-    probabilities = step("score", scorer.probability, logits, rows)
-    selected = step("select", pack, rows, probabilities)
-    return rows, probabilities, selected, scored, parts
+    selected = None
+    if policy is not None:
+        calibration, profile, threshold = policy
+        p = step("score", probabilities, logits, rows, calibration)
+        selected = step("select", retain, rows, p, profile, threshold)
+    return rows, logits, selected, scored, parts
 
 
-def collect(scorer, events, route, cap, seeds):
-    chosen, tokens_available, count_scored, count_candidates = [], 0, 0, 0
-    ranked_scores, ranked_labels, ranked_rows = [], [], []
-    for index, e in enumerate(events):
-        rows, p, selected, scored, _ = pipeline(scorer, e, route, cap, seeds)
-        truth = match_labels(e.oracle, rows)
-        tokens_available += covered(rows[truth])
-        count_scored += scored
-        count_candidates += len(rows)
-        ranked_scores.append(p)
-        ranked_labels.append(truth)
-        ranked_rows.append(rows)
-        chosen.extend((float(p[i]), bool(truth[i]), int(rows[i, 1] - rows[i, 0]), index, e.prompt)
-                      for i in selected)
+@dataclass
+class Proposal:
+    rows: np.ndarray
+    logits: np.ndarray
+    labels: np.ndarray
+    scored: int
+
+
+def gather(scorer, events, route, cap, seeds):
+    proposals = []
+    for event in events:
+        rows, logits, _, scored, _ = pipeline(scorer, event, route, cap, seeds)
+        proposals.append(Proposal(rows, logits, match_labels(event.oracle, rows), scored))
+    return proposals
+
+
+def bands(lengths):
+    return np.where(lengths == 4, 0, np.where(lengths <= 6, 1, 2))
+
+
+def adjusted_scores(rows, p, profile):
+    return p - np.asarray(PROFILES[profile])[bands(rows[:, 1] - rows[:, 0])]
+
+
+def retain(rows, p, profile, threshold):
+    scores = adjusted_scores(rows, p, profile)
+    eligible = np.flatnonzero(scores >= threshold)
+    return eligible[pack(rows[eligible], scores[eligible])]
+
+
+def ranked_picks(proposals, events, p, profile):
+    chosen = []
+    for index, (proposal, event, prob) in enumerate(zip(proposals, events, p, strict=True)):
+        scores = adjusted_scores(proposal.rows, prob, profile)
+        lengths = proposal.rows[:, 1] - proposal.rows[:, 0]
+        chosen.extend((float(scores[i]), bool(proposal.labels[i]), int(lengths[i]), index, event.prompt)
+                      for i in pack(proposal.rows, scores))
+    return sorted(chosen, key=lambda row: -row[0])
+
+
+def candidate_metrics(proposals, events, p):
     oracle_tokens = sum(covered(dense_rows(e.size, 4)[e.oracle[:e.size - 3] >= 4]) for e in events)
-    return sorted(chosen, key=lambda row: -row[0]), {
+    possible = sum(covered(a.rows[a.labels]) for a in proposals)
+    return {
         "oracle_tokens": oracle_tokens,
-        "oracle_candidate_coverage": tokens_available / max(1, oracle_tokens),
-        "mean_candidates_scored": count_scored / len(events),
-        "mean_candidates_retained": count_candidates / len(events),
-        "candidate_macro_ap_conditional": macro_ap(np.concatenate(ranked_scores), np.concatenate(ranked_rows),
-                                                   np.concatenate(ranked_labels)),
+        "oracle_candidate_coverage": possible / max(1, oracle_tokens),
+        "mean_candidates_scored": float(np.mean([a.scored for a in proposals])),
+        "mean_candidates_retained": float(np.mean([len(a.rows) for a in proposals])),
+        "candidate_macro_ap_conditional": macro_ap(np.concatenate(p), np.concatenate([a.rows for a in proposals]),
+                                                   np.concatenate([a.labels for a in proposals])),
     }
 
 
@@ -426,8 +458,24 @@ def curve(picks, n_events, oracle_tokens):
 
 def select_threshold(points, goal, smoke):
     feasible = [p for p in points if p["token_precision"] >= goal
+                and p["span_precision"] >= goal
                 and p["spans"] >= (6 if smoke else 40) and p["fired_prompts"] >= (3 if smoke else 6)]
     return max(feasible, key=lambda p: (p["exact_tokens"], p["token_precision"]), default=None)
+
+
+def retention_details(picks, cut, n_events):
+    selected_counts = np.zeros(n_events, dtype=int)
+    by_length = {length: [0, 0] for length in sorted({row[2] for row in picks})}
+    for p, correct, length, event, _ in picks:
+        if p < cut:
+            break
+        selected_counts[event] += 1
+        by_length[length][0] += 1
+        by_length[length][1] += correct
+    return {"suffix_counts_by_number_of_spans": np.bincount(selected_counts, minlength=5).tolist(),
+            "selected_by_length": {str(L): {"spans": count, "exact_spans": exact,
+                                           "precision": exact / count if count else None}
+                                   for L, (count, exact) in by_length.items()}}
 
 
 def prompt_totals(picks, cut, events):
@@ -454,10 +502,61 @@ def paired_interval(dense, append):
             "prompt_bootstrap_ci95": np.quantile(draws, [.025, .975]).tolist()}
 
 
-def latency(scorer, events, routes, cap, seeds, repeats):
+def route_report(scorer, route, calibration_events, gate, test, args):
+    raw_cal, raw_val, raw_test = [gather(scorer, events, route, args.max_length, args.seeds)
+                                  for events in (calibration_events, gate, test)]
+    calibration = calibrate(raw_cal, args.max_length)
+    val_p, test_p = [[probabilities(a.logits, a.rows, calibration) for a in raw]
+                     for raw in (raw_val, raw_test)]
+    val_meta = candidate_metrics(raw_val, gate, val_p)
+    test_meta = candidate_metrics(raw_test, test, test_p)
+    profiles = ("uniform",) if route == "fixed4" else PROFILES
+    v_picks = {profile: ranked_picks(raw_val, gate, val_p, profile) for profile in profiles}
+    t_picks = {profile: ranked_picks(raw_test, test, test_p, profile) for profile in profiles}
+    v_points = {profile: list(curve(picks, len(gate), val_meta["oracle_tokens"]))
+                for profile, picks in v_picks.items()}
+    t_points = {profile: list(curve(picks, len(test), test_meta["oracle_tokens"]))
+                for profile, picks in t_picks.items()}
+    points, clusters = {}, {}
+    timing_policy = (calibration, "uniform", -1.)
+    timing_source = "unfiltered_fallback"
+    for family, options in (("common", ("uniform",)), ("length_aware", profiles)):
+        points[family], clusters[family] = {}, {}
+        for goal in TARGETS:
+            val_options = [(profile, p) for profile in options
+                           if (p := select_threshold(v_points[profile], goal, args.smoke)) is not None]
+            best = max(val_options, key=lambda item: (item[1]["exact_tokens"], item[0] == "uniform",
+                                                       item[1]["token_precision"]), default=None)
+            value = None
+            if best is not None:
+                profile, v = best
+                cut = v["threshold"]
+                t = next((p for p in reversed(t_points[profile]) if p["threshold"] >= cut), None)
+                value = {"profile": profile, "probability_floors_by_band": dict(zip(
+                    BANDS, (cut + d for d in PROFILES[profile]), strict=True)),
+                    "validation": v, "test": t,
+                    "test_retention": retention_details(t_picks[profile], cut, len(test))}
+                clusters[family][str(goal)] = prompt_totals(t_picks[profile], cut, test)
+                if family == "length_aware" and goal == TARGETS[0]:
+                    timing_policy = (calibration, profile, cut)
+                    timing_source = "length_aware_validation_70"
+            points[family][str(goal)] = value
+    uniform = t_points["uniform"]
+    sample = np.unique(np.linspace(0, len(uniform) - 1, min(len(uniform), 101), dtype=int))
+    return {
+        **test_meta, "calibration": {"slope": calibration[0], "intercepts_by_length": calibration[1].tolist()},
+        "unfiltered_common": uniform[-1], "operating_points": points,
+        "uniform_test_curve_descriptive": [uniform[i] for i in sample],
+        "uniform_best_test_at_precision_descriptive": {
+            str(goal): select_threshold(uniform, goal, args.smoke) for goal in TARGETS},
+        "timing_policy_source": timing_source,
+    }, clusters, timing_policy
+
+
+def latency(scorer, events, routes, cap, seeds, repeats, policies):
     for event in events[:4]:
         for route in routes:
-            pipeline(scorer, event, route, cap, seeds)
+            pipeline(scorer, event, route, cap, seeds, policy=policies[route])
     stages = {route: [] for route in routes}
     elapsed = {route: [] for route in routes}
     for rep in range(repeats):
@@ -465,12 +564,13 @@ def latency(scorer, events, routes, cap, seeds, repeats):
             for route in (routes if rep % 2 == 0 else routes[::-1]):
                 synchronize(scorer.device)
                 begin = time.perf_counter_ns()
-                pipeline(scorer, event, route, cap, seeds)
+                pipeline(scorer, event, route, cap, seeds, policy=policies[route])
                 synchronize(scorer.device)
                 elapsed[route].append((time.perf_counter_ns() - begin) / 1e6)
     for event in events:
         for route in routes:
-            stages[route].append(pipeline(scorer, event, route, cap, seeds, instrument=True)[-1])
+            stages[route].append(pipeline(scorer, event, route, cap, seeds, instrument=True,
+                                          policy=policies[route])[-1])
     return {route: {"p50_ms": float(np.median(elapsed[route])),
                     "p95_ms": float(np.quantile(elapsed[route], .95)),
                     "events": len(events), "repeats": repeats,
@@ -517,6 +617,8 @@ def run(args):
     result = {"checkpoint_sha256": identity, "mode": "smoke" if args.smoke else "full", "device": args.device,
               "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
               "torch": torch.__version__, "cap": args.max_length, "seeds_per_suffix": args.seeds,
+              "threshold_profiles": {name: dict(zip(BANDS, offsets, strict=True))
+                                     for name, offsets in PROFILES.items()},
               "splits": {key: {"events": len(events), "prompts": len({e.prompt for e in events})}
                          for key, events in groups.items()}, "calibration_prompts": len(calibration_prompts),
               "runs": {}, "complete": False}
@@ -533,45 +635,41 @@ def run(args):
             model, val_ap = fit(train, validation, channels, kind, seed, args.max_length, run_device, args.smoke)
             fit_s = time.perf_counter() - run_start
             scorer = Scorer(model, channels, kind, run_device, args.max_length)
-            calibrate(scorer, calibration)
             routes = ("fixed4", "append", "dense")
-            timing = latency(scorer, timing_events, routes, args.max_length, args.seeds, args.repeats)
-            scores, clusters = {}, {}
+            scores, clusters, policies = {}, {}, {}
             for route in routes:
-                val, val_meta = collect(scorer, gate, route, args.max_length, args.seeds)
-                tst, test_meta = collect(scorer, test, route, args.max_length, args.seeds)
-                vp = list(curve(val, len(gate), val_meta["oracle_tokens"]))
-                tp = list(curve(tst, len(test), test_meta["oracle_tokens"]))
-                ops, clusters[route] = {}, {}
-                for goal in TARGETS:
-                    v = select_threshold(vp, goal, args.smoke)
-                    point = None
-                    if v is not None:
-                        cut = v["threshold"]
-                        point = next((p for p in reversed(tp) if p["threshold"] >= cut), None)
-                        clusters[route][str(goal)] = prompt_totals(tst, cut, test)
-                    ops[str(goal)] = {"validation": v, "test": point}
-                    rows_csv.append({"arm": name, "seed": seed, "route": route, "goal": goal,
-                                     "device": str(run_device), "fit_s": fit_s,
-                                     "p50_ms": timing[route]["p50_ms"], "p95_ms": timing[route]["p95_ms"],
-                                     "locked_threshold": None if v is None else v["threshold"],
-                                     "validation_token_precision": None if v is None else v["token_precision"],
-                                     **test_meta, **({} if point is None else point)})
-                sample = np.unique(np.linspace(0, max(0, len(tp) - 1), min(len(tp), 101), dtype=int))
-                scores[route] = {**test_meta, "unfiltered": tp[-1], "operating_points": ops,
-                                 "test_curve_descriptive": [tp[i] for i in sample],
-                                 "best_test_at_precision_descriptive": {
-                                     str(goal): max((p for p in tp if p["token_precision"] >= goal
-                                                     and p["spans"] >= (6 if args.smoke else 40)
-                                                     and p["fired_prompts"] >= (3 if args.smoke else 6)),
-                                                    key=lambda p: p["exact_tokens"], default=None)
-                                     for goal in TARGETS}, "latency": timing[route]}
-            paired = {goal: paired_interval(clusters["dense"][goal], clusters["append"][goal])
-                      for goal in clusters["dense"].keys() & clusters["append"].keys()}
+                scores[route], clusters[route], policies[route] = route_report(scorer, route, calibration, gate, test, args)
+            timing = latency(scorer, timing_events, routes, args.max_length, args.seeds, args.repeats, policies)
+            unfiltered = {route: (policy[0], "uniform", -1.) for route, policy in policies.items()}
+            common_timing = latency(scorer, timing_events, routes, args.max_length, args.seeds, args.repeats,
+                                    unfiltered)
+            for route, report in scores.items():
+                report["latency"] = timing[route]
+                report["latency_unfiltered"] = common_timing[route]
+                for family, operating in report["operating_points"].items():
+                    for goal, point in operating.items():
+                        row = {"arm": name, "seed": seed, "route": route, "policy_family": family, "goal": goal,
+                               "device": str(run_device), "fit_s": fit_s, "p50_ms": timing[route]["p50_ms"],
+                               "p95_ms": timing[route]["p95_ms"], "timing_policy_source": report["timing_policy_source"],
+                               "p50_unfiltered_ms": common_timing[route]["p50_ms"],
+                               "p95_unfiltered_ms": common_timing[route]["p95_ms"],
+                               "oracle_candidate_coverage": report["oracle_candidate_coverage"],
+                               "mean_candidates_scored": report["mean_candidates_scored"],
+                               "status": ("no_validation_gate" if point is None else
+                                          "no_test_selections" if point["test"] is None else "evaluated")}
+                        if point is not None:
+                            row.update(profile=point["profile"], locked_threshold=point["validation"]["threshold"],
+                                       validation_span_precision=point["validation"]["span_precision"],
+                                       validation_token_precision=point["validation"]["token_precision"],
+                                       **{f"floor_{b}": p for b, p in point["probability_floors_by_band"].items()},
+                                       **(point["test"] or {}))
+                        rows_csv.append(row)
+            paired = {family: {goal: paired_interval(clusters["dense"][family][goal], clusters["append"][family][goal])
+                               for goal in clusters["dense"][family].keys() & clusters["append"][family].keys()}
+                      for family in ("common", "length_aware")}
             key = f"{name}_{seed}"
             result["runs"][key] = dict(device=str(run_device), fit_s=fit_s, wall_s=time.perf_counter() - run_start,
-                                       validation_ap=val_ap, calibration_slope=float(scorer.calibration[0]),
-                                       routes=scores, paired=paired)
+                                       validation_ap=val_ap, routes=scores, paired=paired)
             atomic_json(args.output / "summary.json", result)
             fields = list(dict.fromkeys(field for row in rows_csv for field in row))
             with (args.output / "comparison.csv").open("w", encoding="utf8", newline="") as file:
