@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -22,6 +23,13 @@ from torch.nn import functional as F
 
 
 PIN = "5bcaf16e3a202a9eb05b0995559bde575d4c9fe5fd3ccab02314a110cfb83fc5"
+ZIP_SIZE = 43_821_383
+MEMBER_PINS = {
+    "events.json": "0ea3314f3a66ddbbc2701fc385fa6cfc29dfa736cdd4f4af907faf4784da63e7",
+    "features.npz": "38afa6d4d149d7be1fd255837b70b1e15a8de1e1503c6d386b4bb61552e4e9d3",
+    "input_any_4.npz": "d8f560e1056d1cc0f39c5142d82ce92dd6257ae0202386b2f5dce8c13ea03cc8",
+    "input_any_8.npz": "866b168c3f75cd029bd97a24320ec9a628bb579a8b7e4a37bf3cd8d062593230",
+}
 SEEDS = (42, 123, 2026)
 ARMS = {
     "hgb_scalar": (15, "hgb"),
@@ -49,6 +57,44 @@ def digest(path):
         for chunk in iter(lambda: stream.read(2**20), b""):
             sha.update(chunk)
     return sha.hexdigest()
+
+
+def find_input(hint, search_root):
+    if hint.is_file():
+        return hint
+    if all((hint / name).is_file() for name in MEMBER_PINS):
+        return hint
+    for root in dict.fromkeys((hint, search_root)):
+        if root is None or not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and path.stat().st_size == ZIP_SIZE and digest(path) == PIN:
+                return path
+        for path in sorted(root.rglob("events.json")):
+            folder = path.parent
+            if all((folder / name).is_file() and digest(folder / name) == pin
+                   for name, pin in MEMBER_PINS.items()):
+                return folder
+    visible = [str(p) for p in sorted(search_root.iterdir())[:12]] if search_root and search_root.is_dir() else []
+    raise FileNotFoundError(f"SAVH full input not found in {hint} or {search_root}. "
+                            f"Attach the original ZIP or its four verified members. Visible mounts: {visible}")
+
+
+@contextmanager
+def open_input(path):
+    if path.is_dir():
+        def read(name):
+            payload = (path / name).read_bytes()
+            if hashlib.sha256(payload).hexdigest() != MEMBER_PINS[name]:
+                raise ValueError(f"Unexpected SHA-256 for extracted SAVH file: {path / name}")
+            return payload
+        yield read
+    else:
+        identity = digest(path)
+        if identity != PIN:
+            raise ValueError(f"Expected SAVH full ZIP SHA-256 {PIN}, got {identity}")
+        with ZipFile(path) as archive:
+            yield archive.read
 
 
 def longest(source, reference):
@@ -135,9 +181,9 @@ class Event:
 
 
 def load(path, smoke):
-    with ZipFile(path) as archive:
-        meta = json.loads(archive.read("events.json"))
-        with np.load(io.BytesIO(archive.read("features.npz")), allow_pickle=False) as data:
+    with open_input(path) as read:
+        meta = json.loads(read("events.json"))
+        with np.load(io.BytesIO(read("features.npz")), allow_pickle=False) as data:
             features = np.concatenate([data["scalar"], data["hidden"]], axis=1)
         if features.shape[1] != 48 or not np.isfinite(features).all():
             raise ValueError("Unexpected SAVH feature layout")
@@ -155,7 +201,7 @@ def load(path, smoke):
             for i in eligible:
                 oracles[i] = longest(meta[i]["src"], meta[i]["ref"])
         for length in (4, 8):
-            with np.load(io.BytesIO(archive.read(f"input_any_{length}.npz")), allow_pickle=False) as saved:
+            with np.load(io.BytesIO(read(f"input_any_{length}.npz")), allow_pickle=False) as saved:
                 for i, start, label in zip(saved["groups"], saved["starts"], saved["labels"], strict=True):
                     if i in oracles and (oracles[i][start] >= length) != bool(label):
                         raise ValueError("Saved and recomputed labels differ")
@@ -587,14 +633,13 @@ def atomic_json(path, data):
 
 def run(args):
     started = time.perf_counter()
-    identity = digest(args.input)
-    if identity != PIN:
-        raise ValueError(f"Expected SAVH full ZIP SHA-256 {PIN}, got {identity}")
+    path = find_input(args.input, args.search_root)
+    print(f"Input: {path}", flush=True)
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested. Enable the Kaggle GPU accelerator or use --device cpu.")
     device = torch.device(args.device)
     torch.set_num_threads(4)
-    groups = load(args.input, args.smoke)
+    groups = load(path, args.smoke)
     train, validation, test = (groups[key] for key in ("train", "validation", "test"))
     train_tokens = np.concatenate([e.features for e in train])
     center = train_tokens.mean(axis=0)
@@ -614,7 +659,8 @@ def run(args):
     rng = np.random.default_rng(42)
     timing_events = [test[i] for i in sorted(rng.choice(len(test), min(len(test), args.latency_events), replace=False))]
     args.output.mkdir(parents=True, exist_ok=True)
-    result = {"checkpoint_sha256": identity, "mode": "smoke" if args.smoke else "full", "device": args.device,
+    result = {"checkpoint_sha256": PIN, "input_kind": "verified_members" if path.is_dir() else "zip",
+              "mode": "smoke" if args.smoke else "full", "device": args.device,
               "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
               "torch": torch.__version__, "cap": args.max_length, "seeds_per_suffix": args.seeds,
               "threshold_profiles": {name: dict(zip(BANDS, offsets, strict=True))
@@ -686,6 +732,7 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--search-root", type=Path, help="Fallback mount directory for SAVH discovery")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--smoke", action="store_true")
