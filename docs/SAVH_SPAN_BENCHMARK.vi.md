@@ -1,6 +1,6 @@
 # So sánh cửa sổ trượt với head chấm cặp đầu–cuối
 
-Bài test dùng ZIP kết quả `savh_ca813c7c0101_full.zip`. Đây là ZIP nhỏ chứa `features.npz`, `events.json` và labels từ SAVH pilot. SHA-256 là `5bcaf16e3a202a9eb05b0995559bde575d4c9fe5fd3ccab02314a110cfb83fc5`. Runner xác minh SHA-256 và tái tính nhãn exact từ token ID, đồng thời đối chiếu nhãn L4/L8 đã lưu. Input Long64 và ZIP verifier raw phục vụ các bước thu feature trước đó.
+Bài test dùng kết quả `savh_ca813c7c0101_full.zip`. Runner nhận ZIP gốc kể cả khi đổi tên, hoặc thư mục có `events.json`, `features.npz`, `input_any_4.npz` và `input_any_8.npz` giải nén từ ZIP đó. Runner kiểm tra SHA-256 của ZIP gốc hoặc của từng file giải nén, rồi tái tính nhãn exact từ token ID và đối chiếu nhãn L4/L8 đã lưu. Input Long64 và ZIP verifier raw phục vụ các bước thu feature trước đó.
 
 ## Thiết kế thí nghiệm
 
@@ -53,15 +53,11 @@ import subprocess
 import sys
 import urllib.request
 
-INPUT = Path("/kaggle/input")  # hoặc đường dẫn trực tiếp đến ZIP SAVH full
+INPUT = Path("/kaggle/input/datasets/ainzkhail/savh-data")
 DEVICE = "cuda"
 MAX_LENGTH = 8
-REV = "4545f6449c391c0044efb6cacd7a874a3c9a167b"
-SHA = "598ef366791e42fd2079ba7665933d354d37e3566361c55f333acc6003d5b62e"
-
-matches = [INPUT] if INPUT.is_file() else sorted(INPUT.rglob("savh_ca813c7c0101_full.zip"))
-if len(matches) != 1:
-    raise ValueError(f"Đặt INPUT thành đường dẫn trực tiếp đến ZIP kết quả SAVH full. Tìm thấy {matches}")
+REV = "18d3e24446a961445fb89fdf67404cda2cfe1a17"
+SHA = "6f898a67e3f6443c1640fa1a85a3204fa7ff02144d8ba7b8b97e85018090f56c"
 
 work = Path("/kaggle/working")
 script = work / "benchmark_savh_spans.py"
@@ -72,7 +68,7 @@ if hashlib.sha256(payload).hexdigest() != SHA:
     raise RuntimeError("SHA-256 của runner không khớp commit đã pin")
 script.write_bytes(payload)
 
-base = [sys.executable, "-u", str(script), "--input", str(matches[0]),
+base = [sys.executable, "-u", str(script), "--input", str(INPUT), "--search-root", "/kaggle/input",
         "--device", DEVICE, "--max-length", str(MAX_LENGTH)]
 smoke = work / "savh_span_threshold_smoke"
 full = work / "savh_span_threshold_compare"
