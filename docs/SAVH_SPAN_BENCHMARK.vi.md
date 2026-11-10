@@ -23,14 +23,21 @@ Các nhánh đều chọn đoạn không overlap ở nguồn theo thứ hạng c
 | Biaffine hidden | Cùng feature, tích hai projection đầu–cuối hạng 16, cộng score từ pooling và độ dài. |
 | Attention hidden | Cùng feature và scorer với MLP hidden, thêm một lớp attention 4 head. |
 
-Full fit một HGB và năm head PyTorch với ba seed, tổng **16 fits và 48 cặp head/phương pháp**. Chuẩn hóa fit trên train. PyTorch chọn epoch theo macro AP trên validation. Calibration học một slope không âm và bias theo chiều dài trên một nhóm prompt validation, dùng chung giữa các route. Nhóm prompt validation còn lại chọn ngưỡng theo từng route. HGB dùng CPU và các head PyTorch dùng thiết bị đã chọn, do đó phép so latency chính là `append` với `dense` trong từng head.
+Full fit một HGB và năm head PyTorch với ba seed, tổng **16 fits và 48 cặp head/phương pháp**. Chuẩn hóa fit trên train. PyTorch chọn epoch theo macro AP trên validation. HGB dùng CPU và các head PyTorch dùng thiết bị đã chọn, do đó phép so latency chính là `append` với `dense` trong từng head.
+
+## Ngưỡng giữ với độ dài thay đổi và nhiều đoạn
+
+1. Chia validation theo prompt thành nhóm hiệu chuẩn và nhóm chọn policy. Với mỗi head và mỗi route, fit `sigmoid(a * logit + bias[length])`, với `a >= 0`, trên đúng các ứng viên route đó sinh ra. Append tạo ứng viên bằng điểm seed 4 token trước bước này. Mỗi đoạn sau append được chấm nguyên đoạn và nhận bias của đúng độ dài.
+2. Chạy hai họ policy. `common` dùng một ngưỡng chung trên xác suất đã hiệu chuẩn. `length_aware` so các profile đặt trước cho nhóm **4 / 5–6 / 7+ token**. Các profile dùng độ lệch `0/0/0`, `0/+.03/+.06`, `0/+.05/+.10` hoặc `0/-.03/-.06`. Với độ lệch `d` và ngưỡng cơ sở `t`, đoạn đạt nếu `p-d >= t`. Dùng cùng `p-d` để xếp hạng. Ví dụ, `t=.72` và profile `0/+.03/+.06` cho ba ngưỡng `.72/.75/.78`.
+3. Duyệt theo thứ hạng, giữ đoạn khi không đè lên đoạn đã chọn và còn chỗ trong ngân sách 16 token. Một suffix có thể giữ 0 đến 4 đoạn. Một seed ngắn đủ ngưỡng vẫn có thể được giữ khi đoạn mở rộng không đạt ngưỡng. Khi hai đoạn overlap, selector giữ theo thứ hạng. Ngân sách là mức tối đa, có thể giữ ít hơn 16 token.
+4. Trên nhóm validation dùng để chọn policy, tối đa hóa số token đúng với **cả precision theo đoạn và precision theo token** đạt mục tiêu 70/75/80/85/90%, tối thiểu 40 đoạn từ 6 prompt ở full. Trong họ `length_aware`, profile chung là một lựa chọn và được ưu tiên khi bằng số token đúng. Khóa profile và ngưỡng rồi áp nguyên sang test. Nếu thiếu điểm đủ điều kiện, ghi `no_validation_gate`. Khi đã có ngưỡng nhưng không giữ đoạn nào trên test, ghi `no_test_selections`.
 
 ## Các phép đo
 
 1. Đo số ứng viên chấm và tỷ lệ vị trí token oracle có ít nhất một đoạn đúng trong tập ứng viên. Đây là trần trước bước chọn và ngưỡng.
 2. Báo precision theo đoạn, precision theo token, số token đúng, recall trên union token oracle, tỷ lệ event có dự đoán và AP theo độ dài trên tập ứng viên. Một đoạn sai đóng góp 0 token đúng. AP ứng viên là số đo có điều kiện trên tập đã sinh.
-3. Thử các mục tiêu validation token precision 70/75/80/85/90%, với tối thiểu 40 đoạn từ 6 prompt ở full. Chọn ngưỡng tối đa số token đúng, khóa ngưỡng sang test và báo precision thực đạt. Khi validation không đủ điều kiện, `operating_points` ghi `null`. Đường cong test chỉ dùng để đối chiếu mô tả ở cùng precision thực đạt. Báo CI 95% ghép cặp theo prompt của chênh lệch token đúng/event giữa hai route tại từng mốc khóa, cùng với precision thực đạt của từng route.
-4. Benchmark batch 1 trên tối đa 96 suffix test, warmup rồi lặp 3 lần và đảo thứ tự route giữa các lượt. Báo p50/p95 tổng latency từ lúc có feature cache đến khi chọn đoạn. Đồng bộ CUDA ở biên đo. Một lượt riêng tách thời gian encode, sinh ứng viên, chấm và chọn. Chi phí chuyển feature cache sang GPU và đưa điểm về CPU nằm trong phép đo neural head. Chi phí chạy Qwen/Fast-dLLM, thu hidden/raw logits, đặt anchor, repair và verify lại thuộc benchmark hệ thống riêng.
+3. Với mỗi ngưỡng đã khóa, báo số suffix giữ 0/1/2/3/4 đoạn và precision theo từng độ dài. Đường cong test của profile chung dùng để đối chiếu mô tả ở cùng precision thực đạt. Báo CI 95% ghép cặp theo prompt của chênh lệch token đúng/event giữa hai route tại từng mốc khóa, cùng với precision thực đạt của từng route.
+4. Benchmark batch 1 trên tối đa 96 suffix test, warmup rồi lặp 3 lần và đảo thứ tự route giữa các lượt. Đo p50/p95 cả khi dùng policy `length_aware` đã khóa tại mốc 70% và khi chạy không lọc điểm. Nếu mốc 70% không có ngưỡng, báo fallback. Đồng bộ CUDA ở biên đo. Một lượt riêng tách thời gian encode, sinh ứng viên, chấm và chọn. Chi phí chuyển feature cache sang GPU và đưa điểm về CPU nằm trong phép đo neural head. Chi phí chạy Qwen/Fast-dLLM, thu hidden/raw logits, đặt anchor, repair và verify lại thuộc benchmark hệ thống riêng.
 
 ZIP SAVH đã nén chỉ có scalar và PCA32 layer 27. `M_off`, hidden trước khi đọc token và fusion nhiều layer cần thêm raw feature archive. Bài test này dùng dữ liệu toán đã được xem để thăm dò, nên kết quả cần xác nhận lại trên prompt mới.
 
@@ -49,8 +56,8 @@ import urllib.request
 INPUT = Path("/kaggle/input")  # hoặc đường dẫn trực tiếp đến ZIP SAVH full
 DEVICE = "cuda"
 MAX_LENGTH = 8
-REV = "74822fe1841ff11e0dfb6f626f442f119684f783"
-SHA = "43145f13f5de79c5d03be488ae24d8d1c81257d070c64c4d3d06a62c5bffd464"
+REV = "4545f6449c391c0044efb6cacd7a874a3c9a167b"
+SHA = "598ef366791e42fd2079ba7665933d354d37e3566361c55f333acc6003d5b62e"
 
 matches = [INPUT] if INPUT.is_file() else sorted(INPUT.rglob("savh_ca813c7c0101_full.zip"))
 if len(matches) != 1:
@@ -67,8 +74,8 @@ script.write_bytes(payload)
 
 base = [sys.executable, "-u", str(script), "--input", str(matches[0]),
         "--device", DEVICE, "--max-length", str(MAX_LENGTH)]
-smoke = work / "savh_span_smoke"
-full = work / "savh_span_compare"
+smoke = work / "savh_span_threshold_smoke"
+full = work / "savh_span_threshold_compare"
 subprocess.run(base + ["--output", str(smoke), "--smoke", "--latency-events", "8", "--repeats", "1"], check=True)
 subprocess.run(base + ["--output", str(full)], check=True)
 print("Kết quả:", shutil.make_archive(str(full), "zip", full))
