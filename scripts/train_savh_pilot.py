@@ -31,6 +31,47 @@ def save(path, data):
     temp.replace(path)
 
 
+def checkpoint_reader(root, stack):
+    if root.is_file():
+        archive = stack.enter_context(zipfile.ZipFile(root))
+        names = set(archive.namelist())
+        return archive.read, names.__contains__
+    if not root.is_dir():
+        raise FileNotFoundError(root)
+    disk, packed = {}, {}
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name in PINS or path.suffix == ".safetensors" or path.match("part-*.zip"):
+            disk.setdefault(path.name, []).append(path)
+        if path.match("verifier_features_part-*.zip"):
+            z = stack.enter_context(zipfile.ZipFile(path))
+            for name in z.namelist():
+                if not name.endswith("/"):
+                    if name in packed:
+                        raise ValueError(f"Duplicate split member: {name}")
+                    packed[name] = z
+
+    def locate(name):
+        exact = root/name
+        if exact.is_file():
+            return exact
+        paths = disk.get(Path(name).name, [])
+        if len(paths) > 1:
+            raise ValueError(f"Ambiguous checkpoint member {name}: {paths}")
+        return paths[0] if paths else None
+
+    def read(name):
+        path = locate(name)
+        if path is not None:
+            return path.read_bytes()
+        if name in packed:
+            return packed[name].read(name)
+        raise FileNotFoundError(f"Missing checkpoint member {name} under {root}")
+
+    return read, lambda name: name in packed or locate(name) is not None
+
+
 def prepare(root, output, smoke):
     import numpy as np
     import pyarrow.parquet as pq
@@ -41,24 +82,7 @@ def prepare(root, output, smoke):
         with np.load(cache) as z:
             return json.loads(events_file.read_text()), z["scalar"], z["hidden"]
     with ExitStack() as stack:
-        if root.is_file():
-            archive = stack.enter_context(zipfile.ZipFile(root))
-            read = archive.read
-        elif (root/"events.jsonl").is_file():
-            read = lambda name: (root/name).read_bytes()
-        else:
-            parts = sorted(root.rglob("verifier_features_part-*.zip"))
-            if not parts:
-                raise FileNotFoundError("Point INPUT to the original feature ZIP, extracted archive, or all split ZIPs")
-            locations = {}
-            for part in parts:
-                a = stack.enter_context(zipfile.ZipFile(part))
-                for name in a.namelist():
-                    if not name.endswith("/"):
-                        if name in locations:
-                            raise ValueError(f"Duplicate split member: {name}")
-                        locations[name] = a
-            read = lambda name: locations[name].read(name)
+        read, exists = checkpoint_reader(root, stack)
         metadata = {n:read(n) for n in PINS}
         for name, data in metadata.items():
             if sha(data) != PINS[name]:
@@ -84,6 +108,16 @@ def prepare(root, output, smoke):
                 chosen.update(group[i*len(group)//24]["id"] for i in range(24))
         else:
             chosen={e["id"] for e in events.values() if e["correction_emitted_within_output_budget"]}
+        missing = []
+        for key in sorted(chosen):
+            t = events[key]["tensors"]
+            if not exists(t["shard"]) and not exists(t["member"]):
+                missing.append(key)
+        if missing:
+            raise FileNotFoundError(
+                f"Checkpoint missing tensor data for {len(missing)}/{len(chosen)} selected events. "
+                f"Examples: {missing[:5]}. Attach the original ZIP, all split ZIPs or extracted tensors."
+            )
         size=sum(len(events[k]["source_ids"]) for k in chosen)
         hidden=np.lib.format.open_memmap(output/"layer27.npy",mode="w+",dtype="float16",shape=(size,3584))
         scalar, result=[], []
@@ -94,13 +128,18 @@ def prepare(root, output, smoke):
             ids=[k for k in chosen if events[k]["tensors"]["shard"]==name]
             if not ids:
                 continue
-            raw=read(name)
-            if sha(raw)!=p["sha256"]:
-                raise ValueError(f"Shard hash differs: {name}")
-            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            with ExitStack() as shard_stack:
+                if exists(name):
+                    raw=read(name)
+                    if sha(raw)!=p["sha256"]:
+                        raise ValueError(f"Shard hash differs: {name}")
+                    z=shard_stack.enter_context(zipfile.ZipFile(io.BytesIO(raw)))
+                    read_tensor=z.read
+                else:
+                    read_tensor=read
                 for key in sorted(ids):
                     e=events[key]; label=labels[key]; t=e["tensors"]
-                    payload=z.read(t["member"])
+                    payload=read_tensor(t["member"])
                     assert sha(payload)==t["sha256"] and key not in seen
                     seen.add(key)
                     ts=load(payload)
