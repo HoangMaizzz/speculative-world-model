@@ -33,6 +33,30 @@ class SpanBenchmarkTest(unittest.TestCase):
         self.assertAlmostEqual(points[-1]["token_precision"], 2 / 3)
         self.assertEqual(points[-1]["token_recall"], .5)
 
+    def test_length_floors_can_keep_two_short_spans_and_abstain(self):
+        rows = np.array([[0, 8], [0, 4], [4, 8], [10, 16]])
+        scores = np.array([.77, .74, .73, .71])
+        self.assertEqual(bench.retain(rows, scores, "uniform", .72).tolist(), [0])
+        self.assertEqual(bench.retain(rows, scores, "strict_long", .72).tolist(), [1, 2])
+        self.assertEqual(bench.retain(rows, scores, "strict_long", .95).tolist(), [])
+
+    def test_threshold_sweep_is_same_as_running_selector_at_the_floor(self):
+        rng = np.random.default_rng(42)
+        rows = bench.dense_rows(25, 8)
+        scores = rng.random(len(rows))
+        for profile in bench.PROFILES:
+            adjusted = bench.adjusted_scores(rows, scores, profile)
+            selected = bench.pack(rows, adjusted)
+            for cut in (.0, .45, .70, .90):
+                self.assertEqual(bench.retain(rows, scores, profile, cut).tolist(),
+                                 selected[adjusted[selected] >= cut].tolist())
+
+    def test_precision_gate_checks_spans_as_well_as_tokens(self):
+        point = dict(token_precision=.81, span_precision=.69, exact_tokens=250, spans=50, fired_prompts=10)
+        self.assertIsNone(bench.select_threshold([point], .70, False))
+        point["span_precision"] = .70
+        self.assertIs(bench.select_threshold([point], .70, False), point)
+
     def test_shared_head_scores_an_interval_the_same_in_either_batch(self):
         x = torch.rand(1, 11, 15)
         dense = torch.as_tensor(bench.dense_rows(11, 8))[None]
