@@ -1,6 +1,6 @@
 # REST và Token Recycling trên 50 MATH‑500 + 50 HumanEval
 
-Benchmark chạy decoder REST và Token Recycling từ hai commit chính chủ, cùng greedy AR của Hugging Face. Cả ba dùng **Vicuna‑7B‑v1.3 FP16, batch 1, một GPU** và nhận đúng cùng prompt token IDs. Checkpoint và dữ liệu được ghi vào manifest. Đây là phép so trên checkpoint và hai tập đã chọn. [REST](https://github.com/FasterDecoding/REST/tree/154d0f0ae45de5d8a9cbd1c696f6ad5da10904bf) · [Token Recycling](https://github.com/Luowaterbi/TokenRecycling/tree/1b4c05cc642d111f12c61d4a99950d737121d9fe)
+Benchmark chạy decoder REST và Token Recycling từ hai commit chính chủ, cùng greedy AR của Hugging Face. Cả ba dùng **Vicuna‑7B‑v1.3 FP16, batch 1** và nhận đúng cùng prompt token IDs. Với hai GPU CUDA, mỗi GPU giữ 16 lớp và KV cache của các lớp đó. Thời gian đo gồm cả truyền dữ liệu giữa hai GPU. Với một GPU, toàn bộ model và cache nằm trên GPU đó. Manifest ghi cách chia lớp, checkpoint và dữ liệu. [REST](https://github.com/FasterDecoding/REST/tree/154d0f0ae45de5d8a9cbd1c696f6ad5da10904bf) · [Token Recycling](https://github.com/Luowaterbi/TokenRecycling/tree/1b4c05cc642d111f12c61d4a99950d737121d9fe)
 
 | | MATH‑500 | HumanEval |
 |---|---|---|
@@ -14,7 +14,7 @@ Token Recycling dùng cây `2.2.2`, 80 nút draft và một root, top‑8 GPU, c
 
 ## Cell Kaggle
 
-Gắn file `run_rest_recycling_50x50.py` dưới dạng một Kaggle Dataset, bật Internet và chọn GPU cho phiên chạy. Nếu dùng **Save & Run All**, kiểm tra accelerator trong **Advanced Settings** của cửa sổ lưu. Launcher chấp nhận phiên T4 ×2 và chạy trên `cuda:0`. Một T4 16 GB rất sát VRAM vì Vicuna FP16 và KV cache cấp phát sẵn. Dùng GPU 24 GiB trở lên nếu có. Để `SMOKE = False` chạy đủ 100 câu, đổi thành `True` để kiểm tra khởi động trên 2 + 2 câu với giới hạn 64 token.
+Gắn file `run_rest_recycling_50x50.py` dưới dạng một Kaggle Dataset, bật Internet và chọn **GPU T4 ×2** cho phiên chạy. Nếu dùng **Save & Run All**, kiểm tra accelerator trong **Advanced Settings** của cửa sổ lưu. Có thể dùng một GPU với đủ VRAM, ví dụ GPU 24 GiB. Để `SMOKE = False` chạy đủ 100 câu, đổi thành `True` để kiểm tra khởi động trên 2 + 2 câu với giới hạn 64 token.
 
 ```python
 from pathlib import Path
@@ -46,6 +46,8 @@ subprocess.check_call([
 Model, ShareGPT và câu hỏi được tải tự động. Cần khoảng 13,5 GB cho trọng số, cộng môi trường CUDA và cache. Các lần chạy lại trong cùng phiên tái sử dụng model và index. Kết quả xuất thành một file ZIP trong `/kaggle/working/rest_recycling_50x50`.
 
 Dòng `CUDA preflight passed` xác nhận chính PyTorch trong môi trường benchmark đã khởi tạo được GPU. Nếu `nvidia-smi` thấy GPU và worker vẫn dừng, xem dòng `CUDA preflight` cùng `CUDA error` để xác định lỗi CUDA hoặc cấu hình thiết bị.
+
+KV cache REST và Token Recycling được cấp theo độ dài prompt lớn nhất cộng ngân sách sinh và phần dự phòng cho cây. Việc giữ đường đã accept dùng cùng chỉ số của decoder gốc trên từng khối KV. Nếu GPU hết bộ nhớ trong lúc đo, phiên ghi ZIP với các dòng đã đo và `execution_status.json` có trạng thái `partial_cuda_oom`. Tải ZIP đó để giữ dữ liệu. Phiên đo đầy đủ sinh `summary.json` với trạng thái `complete`.
 
 ## Đọc kết quả
 

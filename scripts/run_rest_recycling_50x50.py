@@ -114,8 +114,61 @@ def load_plan(math_path, human_path, smoke):
 def author_function(path, name, globals_):
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     function, = (node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    if name in ("update_inference_inputs", "recycling_forward"):
+        # The native code packs every layer in one tensor. Apply its same gather
+        # and copy per device, keeping the native accepted indices and lengths.
+        loop = next(node for node in function.body if isinstance(node, ast.For)) if name == "recycling_forward" else function
+        for i, node in enumerate(loop.body):
+            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "tgt":
+                break
+        else:
+            raise ValueError(f"Native KV compaction was not found in {path}")
+        original = loop.body[i:i + 4]
+        if ([type(node) for node in original] != [ast.Assign, ast.Assign, ast.Expr, ast.Expr]
+                or [node.targets[0].id for node in original[:2]] != ["tgt", "dst"]
+                or original[2].value.func.attr != "copy_" or original[3].value.func.attr != "fill_"):
+            raise ValueError(f"Unexpected native KV compaction in {path}")
+        indices = "verify_input_ids.size(1) + index_path" if name == "recycling_forward" else "select_indices"
+        offset = "verify_input_ids.size(1)" if name == "recycling_forward" else "prev_input_len"
+        call = ast.parse(f"compact_cache(past_key_values_data, current_length_data, {indices}, {offset})").body[0]
+        loop.body[i:i + 4] = [ast.copy_location(call, original[0])]
+        ast.fix_missing_locations(function)
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), globals_)
     return globals_[name]
+
+
+def device_map(visible_gpus):
+    if visible_gpus == 1:
+        return {"": "cuda:0"}
+    mapping = {"model.embed_tokens": "cuda:0", "model.norm": "cuda:0", "lm_head": "cuda:0"}
+    mapping.update({f"model.layers.{i}": f"cuda:{i // 16}" for i in range(32)})
+    return mapping
+
+
+def allocate_cache(torch, model, cache_type, capacity):
+    config = model.config
+    devices = {}
+    for i, layer in enumerate(model.model.layers):
+        devices.setdefault(next(layer.parameters()).device, []).append(i)
+    lengths = torch.zeros(config.num_hidden_layers * 2, dtype=torch.long, device="cpu")
+    caches = [None] * config.num_hidden_layers
+    blocks = []
+    for device, layers in devices.items():
+        block = torch.zeros(
+            (2 * len(layers), 1, config.num_key_value_heads, capacity, config.hidden_size // config.num_attention_heads),
+            device=device, dtype=model.dtype,
+        )
+        blocks.append(block)
+        for row, layer in enumerate(layers):
+            caches[layer] = [cache_type(block[2 * row + j], lengths[2 * layer + j]) for j in range(2)]
+    return caches, blocks, lengths
+
+
+def compact_cache(blocks, lengths, indices, offset):
+    for block in blocks:
+        selected = block.index_select(-2, indices.to(block.device))
+        block[..., offset:offset + indices.numel(), :].copy_(selected, non_blocking=True)
+    lengths.fill_(offset + indices.numel())
 
 
 def rest_index(work, tokenizer, sharegpt_path, draftretriever):
@@ -174,12 +227,14 @@ def draft_counts(method, native_lengths, comparable_length):
     return accepted
 
 
-def decode(torch, tokenizer, forward, method, prompt, limit):
+def decode(torch, tokenizer, forward, method, prompt, limit, devices):
     ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda:0")
-    torch.cuda.synchronize()
+    for device in devices:
+        torch.cuda.synchronize(device)
     start = time.perf_counter()
     output, native_count, lengths = forward(ids, limit)
-    torch.cuda.synchronize()
+    for device in devices:
+        torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - start
     raw = output[0, ids.shape[1]:].tolist()
     eos = tokenizer.eos_token_id
@@ -194,7 +249,7 @@ def decode(torch, tokenizer, forward, method, prompt, limit):
             "native_accept_lengths": lengths, "text": tokenizer.decode(tokens, skip_special_tokens=True)}
 
 
-def measure(torch, tokenizer, forward, method, plan, output, reset=None):
+def measure(torch, tokenizer, forward, method, plan, output, devices, reset=None):
     rows = []
     with (output / f"{method}.jsonl").open("w", encoding="utf-8") as file:
         for i, item in enumerate(plan):
@@ -202,10 +257,13 @@ def measure(torch, tokenizer, forward, method, plan, output, reset=None):
             if i == 0 or dataset != plan[i - 1]["dataset"]:
                 if reset:
                     reset()
-                decode(torch, tokenizer, forward, method, WARMUPS[dataset], 32)
+                decode(torch, tokenizer, forward, method, WARMUPS[dataset], 32, devices)
                 if reset:
                     reset()
-            result = decode(torch, tokenizer, forward, method, item["prompt"], item["limit"])
+            try:
+                result = decode(torch, tokenizer, forward, method, item["prompt"], item["limit"], devices)
+            except torch.cuda.OutOfMemoryError as exc:
+                raise torch.cuda.OutOfMemoryError(f"{method} {item['id']} ({i + 1}/{len(plan)}): {exc}") from exc
             row = {**{k: item[k] for k in ("dataset", "id", "index", "limit")}, "method": method, **result}
             file.write(json.dumps(row, ensure_ascii=False) + "\n")
             file.flush()
@@ -263,7 +321,7 @@ def probe_cuda(torch):
         raise RuntimeError(f"No CUDA GPU is visible to the benchmark worker. {runtime}")
     torch.cuda.set_device(0)
     gpu = torch.cuda.get_device_properties(0)
-    print(f"CUDA preflight passed: visible GPUs={visible}; using cuda:0 ({gpu.name}, "
+    print(f"CUDA preflight passed: visible GPUs={visible}; primary cuda:0 ({gpu.name}, "
           f"{gpu.total_memory / 2**30:.1f} GiB)", flush=True)
     return gpu, visible
 
@@ -283,9 +341,9 @@ def worker(args):
     sys.path[:0] = [str(rest), str(recycling)]
     from rest.model import utils as rest_utils
     from rest.model.rest_model import RestModel
-    from rest.model.kv_cache import initialize_past_key_values as rest_cache
+    from rest.model.kv_cache import KVCache as RestCache
     from model.recycling.modeling_llama_kv import LlamaForCausalLM
-    from model.recycling.kv_cache import initialize_past_key_values as recycling_cache
+    from model.recycling.kv_cache import KVCache as RecyclingCache
     from model.recycling.tree_template_ import choose_tree_template
 
     math_path = Path(hf_hub_download("HuggingFaceH4/MATH-500", "test.jsonl", repo_type="dataset",
@@ -303,13 +361,21 @@ def worker(args):
         if item["prompt_tokens"] + item["limit"] + 82 > 2048:
             raise ValueError(f"{item['id']} exceeds the shared Vicuna context window")
     json_file(output / "prompts.json", plan)
+    placement = device_map(visible_gpus)
+    devices = tuple(sorted(set(placement.values())))
+    # At most one extra committed tree plus the next verifier input. Allocate
+    # by the actual benchmark window instead of the checkpoint's max context.
+    capacity = max(item["prompt_tokens"] + item["limit"] for item in plan) + 82
+    capacity = max(capacity, max(len(tokenizer.encode(p)) for p in WARMUPS.values()) + 32 + 82)
+    print(f"Benchmark uses {', '.join(devices)}; native tree KV capacity={capacity} tokens", flush=True)
     sharegpt = Path(hf_hub_download("Aeala/ShareGPT_Vicuna_unfiltered", SHAREGPT_FILE, repo_type="dataset"))
     index_path = rest_index(args.work, tokenizer, sharegpt, draftretriever)
     json_file(output / "manifest.json", {
         "mode": "smoke" if args.smoke else "full", "repos": REPOS, "model": MODEL, "model_revision": MODEL_REVISION,
         "math_revision": MATH_REVISION, "human_eval_sha256": hashlib.sha256(human_path.read_bytes()).hexdigest(),
         "sharegpt_sha256": SHAREGPT_SHA256, "index_bytes": index_path.stat().st_size, "seed": 42, "dtype": "float16",
-        "gpu": gpu.name, "gpu_vram_bytes": gpu.total_memory, "visible_gpus": visible_gpus, "selected_gpu": "cuda:0",
+        "gpu": gpu.name, "gpu_vram_bytes": gpu.total_memory, "visible_gpus": visible_gpus, "devices": devices,
+        "device_map": placement, "native_cache_capacity": capacity,
         "torch": torch.__version__, "cuda": torch.version.cuda,
         "temperature": 0, "warmup_prompts": WARMUPS, "warmup_token_budget": 32,
         "recycling_state": "zero after warmup and across datasets, retained within each dataset",
@@ -317,7 +383,7 @@ def worker(args):
         "rest": {"nodes": 64, "suffix_lengths": [16, 2], "max_continuation": 10},
         "recycling": {"top_k": 8, "tree": "2.2.2", "draft_nodes": 80},
     })
-    options = {"torch_dtype": torch.float16, "low_cpu_mem_usage": True, "device_map": {"": "cuda:0"},
+    options = {"torch_dtype": torch.float16, "low_cpu_mem_usage": True, "device_map": placement,
                "local_files_only": True}
 
     def run_arm(method):
@@ -334,8 +400,12 @@ def worker(args):
         elif method == "rest":
             model = RestModel.from_pretrained(model_path, **options).eval()
             datastore = draftretriever.Reader(str(index_path))
+            update = author_function(rest / "rest" / "model" / "utils.py", "update_inference_inputs", {
+                **vars(rest_utils), "compact_cache": compact_cache,
+            })
             author_forward = author_function(rest / "llm_judge" / "gen_model_answer_rest.py", "rest_forward", {
-                **vars(rest_utils), "torch": torch, "time": time, "initialize_past_key_values": rest_cache,
+                **vars(rest_utils), "torch": torch, "time": time, "update_inference_inputs": update,
+                "initialize_past_key_values": lambda model: allocate_cache(torch, model, RestCache, capacity),
             })
 
             def forward(ids, limit):
@@ -350,8 +420,10 @@ def worker(args):
             adjacency = torch.zeros((model.config.vocab_size, 8), device="cuda:0", dtype=torch.long)
             reset = adjacency.zero_
             author_forward = author_function(recycling / "evaluation" / "inference_recycling.py", "recycling_forward", {
-                "torch": torch, "initialize_past_key_values": recycling_cache, "choose_tree_template": choose_tree_template,
-                "adj_matrix": adjacency,
+                "torch": torch, "initialize_past_key_values": lambda model: allocate_cache(
+                    torch, model, RecyclingCache, capacity
+                ),
+                "choose_tree_template": choose_tree_template, "adj_matrix": adjacency, "compact_cache": compact_cache,
             })
 
             def forward(ids, limit):
@@ -362,16 +434,26 @@ def worker(args):
                 return output_ids, count, lengths
 
         with torch.inference_mode():
-            return measure(torch, tokenizer, forward, method, plan, output, reset)
+            return measure(torch, tokenizer, forward, method, plan, output, devices, reset)
 
     results = {}
-    for method in METHODS:
-        torch.cuda.empty_cache()
-        results[method] = run_arm(method)
-        gc.collect()
-    json_file(output / "summary.json", summary(results))
-    shutil.make_archive(str(output), "zip", root_dir=output)
-    print(f"Completed: {output / 'summary.json'}", flush=True)
+    try:
+        for method in METHODS:
+            for device in devices:
+                with torch.cuda.device(device):
+                    torch.cuda.empty_cache()
+            results[method] = run_arm(method)
+            gc.collect()
+        json_file(output / "summary.json", {"status": "complete", **summary(results)})
+        print(f"Completed: {output / 'summary.json'}", flush=True)
+    except torch.cuda.OutOfMemoryError as exc:
+        json_file(output / "execution_status.json", {
+            "status": "partial_cuda_oom", "completed_methods": list(results), "failed_method": method, "error": str(exc)
+        })
+        print(f"INCOMPLETE: CUDA ran out of memory. Partial results preserved. {exc}", flush=True)
+    finally:
+        archive = shutil.make_archive(str(output), "zip", root_dir=output)
+        print(f"Results archive: {archive}", flush=True)
 
 
 def main():
