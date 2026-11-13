@@ -14,7 +14,7 @@ Token Recycling dùng cây `2.2.2`, 80 nút draft và một root, top‑8 GPU, c
 
 ## Cell Kaggle
 
-Gắn file `run_rest_recycling_50x50.py` dưới dạng một Kaggle Dataset, bật Internet và GPU. Dùng **GPU 24 GiB trở lên** nếu có. Một T4 16 GB rất sát VRAM vì Vicuna FP16 và KV cache cấp phát sẵn. Launcher chỉ dùng một GPU. Để `SMOKE = False` chạy đủ 100 câu, đổi thành `True` để kiểm tra khởi động trên 2 + 2 câu với giới hạn 64 token.
+Gắn file `run_rest_recycling_50x50.py` dưới dạng một Kaggle Dataset, bật Internet và chọn GPU cho phiên chạy. Nếu dùng **Save & Run All**, kiểm tra accelerator trong **Advanced Settings** của cửa sổ lưu. Launcher chấp nhận phiên T4 ×2 và chạy trên `cuda:0`. Một T4 16 GB rất sát VRAM vì Vicuna FP16 và KV cache cấp phát sẵn. Dùng GPU 24 GiB trở lên nếu có. Để `SMOKE = False` chạy đủ 100 câu, đổi thành `True` để kiểm tra khởi động trên 2 + 2 câu với giới hạn 64 token.
 
 ```python
 from pathlib import Path
@@ -22,6 +22,14 @@ import subprocess
 import sys
 
 SMOKE = False
+gpu = subprocess.run(
+    ["nvidia-smi", "--query-gpu=name,memory.total,memory.free", "--format=csv"],
+    capture_output=True, text=True,
+)
+if gpu.returncode != 0:
+    raise RuntimeError("Phiên Kaggle chưa truy cập được GPU. " + (gpu.stderr or gpu.stdout).strip())
+print(gpu.stdout.strip(), flush=True)
+
 scripts = sorted(Path("/kaggle/input").rglob("run_rest_recycling_50x50.py"))
 if len(scripts) != 1:
     raise FileNotFoundError(f"Attach one run_rest_recycling_50x50.py. Found: {scripts}")
@@ -36,6 +44,8 @@ subprocess.check_call([
 ```
 
 Model, ShareGPT và câu hỏi được tải tự động. Cần khoảng 13,5 GB cho trọng số, cộng môi trường CUDA và cache. Các lần chạy lại trong cùng phiên tái sử dụng model và index. Kết quả xuất thành một file ZIP trong `/kaggle/working/rest_recycling_50x50`.
+
+Dòng `CUDA preflight passed` xác nhận chính PyTorch trong môi trường benchmark đã khởi tạo được GPU. Nếu `nvidia-smi` thấy GPU và worker vẫn dừng, xem dòng `CUDA preflight` cùng `CUDA error` để xác định lỗi CUDA hoặc cấu hình thiết bị.
 
 ## Đọc kết quả
 

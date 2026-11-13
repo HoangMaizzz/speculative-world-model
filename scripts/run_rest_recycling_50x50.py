@@ -62,7 +62,6 @@ def launch(args):
     args.work.mkdir(parents=True, exist_ok=True)
     args.output.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, PYTHONUNBUFFERED="1", RAYON_NUM_THREADS="6", HF_HOME=str(args.work / "hf"))
-    env["CUDA_VISIBLE_DEVICES"] = env.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
     env.pop("PYTHONPATH", None)
     rest = checkout(args.work, "REST", env)
     recycling = checkout(args.work, "TokenRecycling", env)
@@ -247,17 +246,37 @@ def summary(results):
     return {"metrics": report, "first_differences": differences}
 
 
+def probe_cuda(torch):
+    runtime = f"torch={torch.__version__}, torch CUDA={torch.version.cuda}, " \
+              f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}"
+    print(f"CUDA preflight: {runtime}", flush=True)
+    try:
+        torch.cuda.init()
+    except (AssertionError, RuntimeError) as exc:
+        raise RuntimeError(
+            "PyTorch could not initialize CUDA in the benchmark worker. "
+            "On Kaggle select a GPU accelerator for this run, including Save & Run All. "
+            f"{runtime}. CUDA error: {exc}"
+        ) from exc
+    visible = torch.cuda.device_count()
+    if visible < 1:
+        raise RuntimeError(f"No CUDA GPU is visible to the benchmark worker. {runtime}")
+    torch.cuda.set_device(0)
+    gpu = torch.cuda.get_device_properties(0)
+    print(f"CUDA preflight passed: visible GPUs={visible}; using cuda:0 ({gpu.name}, "
+          f"{gpu.total_memory / 2**30:.1f} GiB)", flush=True)
+    return gpu, visible
+
+
 def worker(args):
     import gc
     import torch
+
+    gpu, visible_gpus = probe_cuda(torch)
     from huggingface_hub import hf_hub_download, snapshot_download
     from transformers import AutoModelForCausalLM, AutoTokenizer
     import draftretriever
 
-    if torch.cuda.device_count() != 1:
-        raise RuntimeError("Select a CUDA accelerator. This run uses one GPU.")
-    gpu = torch.cuda.get_device_properties(0)
-    print(f"GPU: {gpu.name}; CUDA {torch.version.cuda}; VRAM {gpu.total_memory / 2**30:.1f} GiB", flush=True)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     rest, recycling = map(Path, args.worker)
@@ -290,7 +309,8 @@ def worker(args):
         "mode": "smoke" if args.smoke else "full", "repos": REPOS, "model": MODEL, "model_revision": MODEL_REVISION,
         "math_revision": MATH_REVISION, "human_eval_sha256": hashlib.sha256(human_path.read_bytes()).hexdigest(),
         "sharegpt_sha256": SHAREGPT_SHA256, "index_bytes": index_path.stat().st_size, "seed": 42, "dtype": "float16",
-        "gpu": gpu.name, "gpu_vram_bytes": gpu.total_memory, "torch": torch.__version__, "cuda": torch.version.cuda,
+        "gpu": gpu.name, "gpu_vram_bytes": gpu.total_memory, "visible_gpus": visible_gpus, "selected_gpu": "cuda:0",
+        "torch": torch.__version__, "cuda": torch.version.cuda,
         "temperature": 0, "warmup_prompts": WARMUPS, "warmup_token_budget": 32,
         "recycling_state": "zero after warmup and across datasets, retained within each dataset",
         "native_stop_policy": "native calls keep their stop logic; recycling gets one extra iteration for the prompt root",
