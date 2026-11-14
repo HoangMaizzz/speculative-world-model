@@ -1,6 +1,7 @@
 """Run native REST and Token Recycling against the same greedy Vicuna reference."""
 import argparse
 import ast
+from collections import Counter
 import gzip
 import hashlib
 import json
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from zipfile import BadZipFile, ZipFile
 
 
 REPOS = {
@@ -32,6 +34,33 @@ WARMUPS = {
 }
 PINNED = ("transformers==4.37.1", "accelerate==0.24.1", "huggingface-hub==0.30.2",
           "numpy==1.26.1", "sentencepiece==0.2.0", "protobuf==3.20.3", "tqdm==4.66.1")
+REFERENCE_HASHES = {
+    "manifest.json": "530abe6dc6301ce20e7d947af1ff9d3729096e092a51a88a8032ca5a66d0ab13",
+    "prompts.json": "afb3b48fd544e59f8ffc8dc13f6124c3142f2688f612f18ed57bb93dc5b0b8cc",
+    "ar.jsonl": "35b464b970fb8663f500caff8988c317ee04ce3d845692c19e78fe505d455486",
+}
+
+
+def read_reference(root):
+    paths = [root]
+    if root.is_dir():
+        paths.extend(sorted(root.rglob("full-*.zip")))
+        paths.extend(sorted(root.rglob("*.zip")))
+        paths.extend(sorted({p.parent for p in root.rglob("ar.jsonl")}))
+    for path in dict.fromkeys(paths):
+        try:
+            if path.is_dir():
+                files = {name: (path / name).read_bytes() for name in REFERENCE_HASHES}
+            else:
+                with ZipFile(path) as archive:
+                    files = {name: archive.read(name) for name in REFERENCE_HASHES}
+        except (BadZipFile, OSError, KeyError):
+            continue
+        if all(hashlib.sha256(data).hexdigest() == REFERENCE_HASHES[name] for name, data in files.items()):
+            prompts = json.loads(files["prompts.json"])
+            references = [json.loads(line) for line in files["ar.jsonl"].splitlines()]
+            return prompts, references
+    raise FileNotFoundError(f"Expected full-fae49ow0.zip or its extracted AR files under {root}")
 
 
 def checkout(work, key, env):
@@ -81,6 +110,8 @@ def launch(args):
                "--work", str(args.work), "--output", str(args.output)]
     if args.smoke:
         command.append("--smoke")
+    if args.reuse_reference:
+        command.extend(("--reuse-reference", str(args.reuse_reference)))
     subprocess.run(command, env=env, check=True)
 
 
@@ -132,6 +163,25 @@ def author_function(path, name, globals_):
         offset = "verify_input_ids.size(1)" if name == "recycling_forward" else "prev_input_len"
         call = ast.parse(f"compact_cache(past_key_values_data, current_length_data, {indices}, {offset})").body[0]
         loop.body[i:i + 4] = [ast.copy_location(call, original[0])]
+        ast.fix_missing_locations(function)
+    if "record_tree" in globals_:
+        if name == "rest_forward":
+            assignment = "best_candidate"
+            source = """record_tree(input_ids.shape[1] - input_len, tree_candidates[0].tolist(),
+                draft_buffers["retrieve_indices"].tolist(), int(best_candidate), int(accept_length) + 1)"""
+        elif name == "recycling_forward":
+            assignment = "index_path"
+            source = """record_tree(verify_input_ids.shape[1] - cur_seq_len - 1, input_ids[0].tolist(),
+                father_index, index_path.tolist())"""
+        else:
+            raise ValueError(f"Tree trace unsupported for {name}")
+        loop = next(node for node in function.body if isinstance(node, ast.For))
+        positions = [i for i, node in enumerate(loop.body) if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == assignment
+                             for target in ast.walk(node.targets[0]))]
+        if len(positions) != 1:
+            raise RuntimeError(f"Could not locate the acceptance decision in {path}")
+        loop.body[positions[0] + 1:positions[0] + 1] = ast.parse(source).body
         ast.fix_missing_locations(function)
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), globals_)
     return globals_[name]
@@ -227,6 +277,166 @@ def draft_counts(method, native_lengths, comparable_length):
     return accepted
 
 
+class TreeTrace:
+    def __init__(self):
+        self.rows = []
+        self.recycling_parents = None
+
+    def rest(self, offset, tokens, paths, best, accepted):
+        parents = [-1] * len(tokens)
+        for path in paths:
+            for parent, node in zip(path, path[1:]):
+                if node < 0:
+                    break
+                if parents[node] not in (-1, parent):
+                    raise RuntimeError("REST path has inconsistent parents")
+                parents[node] = parent
+        self.add(offset, tokens, parents, paths[best][:accepted])
+
+    def recycling(self, offset, tokens, parents, accepted_path):
+        if self.recycling_parents is None:
+            self.recycling_parents = parents.tolist()
+        self.add(offset, tokens, self.recycling_parents, accepted_path)
+
+    def add(self, offset, tokens, parents, accepted):
+        if (len(tokens) != len(parents) or parents[0] != -1
+                or any(not 0 <= p < n for n, p in enumerate(parents[1:], 1))
+                or not accepted or accepted[0] != 0
+                or any(parents[node] != prev for prev, node in zip(accepted, accepted[1:]))):
+            raise RuntimeError("Invalid native draft tree or accepted path")
+        self.rows.append(dict(offset=offset, tokens=tokens, parents=parents, accepted_nodes=accepted))
+
+    def drain(self, method, result, prompt_tail):
+        rows, self.rows = self.rows, []
+        self.recycling_parents = None
+        if len(rows) != result["steps"]:
+            raise RuntimeError("Tree trace count differs from native forward count")
+        reconstructed, offset = [], -int(method == "recycling")
+        for row in rows:
+            path = [row["tokens"][i] for i in row["accepted_nodes"]]
+            if row["offset"] != offset:
+                raise RuntimeError("Trace positions do not follow the native accepted path")
+            offset += len(path)
+            reconstructed.extend(path)
+        if method == "recycling":
+            if reconstructed[0] != prompt_tail:
+                raise RuntimeError("Token Recycling root differs from the last prompt token")
+            reconstructed = reconstructed[1:]
+        expected = result["token_ids"]
+        if result["implicit_eos_restored"] and len(reconstructed) < len(expected):
+            expected = expected[:-1]
+        if reconstructed[:len(expected)] != expected:
+            raise RuntimeError("Accepted tree paths do not reconstruct the saved generation")
+        return rows
+
+
+def tree_paths(tree):
+    parents = tree["parents"]
+    prefixes = [(0,)]
+    for node, parent in enumerate(parents[1:], 1):
+        prefixes.append(prefixes[parent] + (node,))
+    internal = set(parents[1:])
+    return [p for i, p in enumerate(prefixes) if i not in internal]
+
+
+def content_path(tree, path, eos):
+    tokens = tree["tokens"]
+    ids = []
+    for node in path:
+        if tokens[node] == eos:
+            break
+        ids.append(tokens[node])
+    return ids
+
+
+def rejected_paths(tree, eos):
+    accepted = set(tree["accepted_nodes"])
+    paths = set()
+    for path in tree_paths(tree):
+        # Stop at EOS on this path and exclude its first off-accepted-path token.
+        content = content_path(tree, path, eos)
+        first = next((i for i, node in enumerate(path[:len(content)]) if node not in accepted), len(content))
+        if len(content) - first - 1 >= 4:
+            paths.add((tree["offset"] + first + 1, tuple(content[first + 1:])))
+    return paths
+
+
+def reuse_events(trees, result, reference, eos):
+    output, gold = result["token_ids"], reference["token_ids"]
+    divergence = first_difference(output, gold)
+    events, skipped = [], Counter()
+    for i, tree in enumerate(trees):
+        end = tree["offset"] + len(tree["accepted_nodes"])
+        if end < 0 or end > len(output) or (end and output[end - 1] == eos):
+            skipped["terminal_or_outside_generation"] += 1
+            continue
+        if divergence is not None and end > divergence:
+            skipped["after_ar_divergence"] += 1
+            continue
+        future = comparable_ids(gold[end:end + 10], eos, 10)
+        if future and future[-1] == eos:
+            future = future[:-1]
+        old = rejected_paths(tree, eos)
+        if len(future) < 4:
+            skipped["short_reference"] += 1
+            continue
+        if not old:
+            skipped["no_rejected_tail_ge4"] += 1
+            continue
+        seeds = {}
+        for j in range(len(future) - 3):
+            seeds.setdefault(tuple(future[j:j + 4]), []).append(j)
+        matches = set()
+        for offset, tokens in old:
+            for k in range(len(tokens) - 3):
+                for j in seeds.get(tokens[k:k + 4], ()):
+                    if k and j and tokens[k - 1] == future[j - 1]:
+                        continue
+                    n = 4
+                    while k + n < len(tokens) and j + n < len(future) and tokens[k + n] == future[j + n]:
+                        n += 1
+                    matches.add((offset + k, end + j, n))
+        same = [m for m in matches if m[0] == m[1]]
+        shifted = [m for m in matches if m[0] != m[1]]
+        same_cover = {d for _, j, n in same for d in range(j, j + n)}
+        shift_cover = {d for _, j, n in shifted for d in range(j, j + n)}
+        next_tree = trees[i + 1] if i + 1 < len(trees) else None
+        next_paths = []
+        if shifted and next_tree:
+            assert next_tree["offset"] == end
+            next_paths = [tuple(content_path(next_tree, path, eos)) for path in tree_paths(next_tree)]
+        reachable = [(j - end, n) for _, j, n in shifted if any(j - end + n <= len(p) for p in next_paths)]
+        reproposed = [(j, n) for j, n in reachable if any(p[j:j + n] == tuple(future[j:j + n]) for p in next_paths)]
+        next_commit = min(end + len(next_tree["accepted_nodes"]), len(output),
+                          len(gold) if divergence is None else divergence) if next_tree else end
+        events.append(dict(round=i, next_offset=end, future_tokens=len(future),
+                           longest_same=max((n for _, _, n in same), default=0),
+                           longest_shift=max((n for _, _, n in shifted), default=0),
+                           same_positions=len(same_cover), shifted_positions=len(shift_cover),
+                           union_positions=len(same_cover | shift_cover),
+                           has_shift_within_1=any(abs(j - k) <= 1 for k, j, _ in shifted),
+                           has_shift_within_4=any(abs(j - k) <= 4 for k, j, _ in shifted),
+                           has_shift_near=any(j - end <= 3 for _, j, _ in shifted),
+                           next_tree_reaches=bool(reachable), next_tree_reproposes=bool(reproposed),
+                           next_tree_accepts=any(end + j + n <= next_commit for j, n in reproposed),
+                           matches=sorted(matches)))
+    return events, skipped
+
+
+def reuse_summary(totals):
+    rates = {
+        "rounds_with_same": ("same_rounds", "eligible_rounds"),
+        "rounds_with_shift": ("shifted_rounds", "eligible_rounds"),
+        "rounds_with_either": ("either_rounds", "eligible_rounds"),
+        "target_token_coverage_same": ("same_positions", "future_tokens"),
+        "target_token_coverage_shift": ("shifted_positions", "future_tokens"),
+        "target_token_coverage_either": ("union_positions", "future_tokens"),
+        "reproposal_given_reachable": ("next_tree_reproposes", "next_tree_reaches"),
+    }
+    return {group: {**dict(c), "rates": {key: c[n] / c[d] if c[d] else None for key, (n, d) in rates.items()}}
+            for group, c in totals.items()}
+
+
 def decode(torch, tokenizer, forward, method, prompt, limit, devices):
     ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda:0")
     for device in devices:
@@ -249,15 +459,24 @@ def decode(torch, tokenizer, forward, method, prompt, limit, devices):
             "native_accept_lengths": lengths, "text": tokenizer.decode(tokens, skip_special_tokens=True)}
 
 
-def measure(torch, tokenizer, forward, method, plan, output, devices, reset=None):
+def measure(torch, tokenizer, forward, method, plan, output, devices, reset=None, trace=None, reference=None):
     rows = []
-    with (output / f"{method}.jsonl").open("w", encoding="utf-8") as file:
+    from contextlib import ExitStack
+    totals = {dataset: Counter() for dataset in ("all", *LIMITS)}
+    with ExitStack() as stack:
+        file = stack.enter_context((output / f"{method}.jsonl").open("w", encoding="utf-8"))
+        if trace:
+            trees_file = stack.enter_context((output / f"{method}_trees.jsonl").open("w", encoding="utf-8"))
+            reuse_file = stack.enter_context((output / f"{method}_reuse.jsonl").open("w", encoding="utf-8"))
         for i, item in enumerate(plan):
             dataset = item["dataset"]
             if i == 0 or dataset != plan[i - 1]["dataset"]:
                 if reset:
                     reset()
                 decode(torch, tokenizer, forward, method, WARMUPS[dataset], 32, devices)
+                if trace:
+                    trace.rows.clear()
+                    trace.recycling_parents = None
                 if reset:
                     reset()
             try:
@@ -265,6 +484,29 @@ def measure(torch, tokenizer, forward, method, plan, output, devices, reset=None
             except torch.cuda.OutOfMemoryError as exc:
                 raise torch.cuda.OutOfMemoryError(f"{method} {item['id']} ({i + 1}/{len(plan)}): {exc}") from exc
             row = {**{k: item[k] for k in ("dataset", "id", "index", "limit")}, "method": method, **result}
+            if trace:
+                prompt_tail = tokenizer.encode(item["prompt"])[-1]
+                trees = trace.drain(method, result, prompt_tail)
+                events, skipped = reuse_events(trees, result, reference[item["id"]], tokenizer.eos_token_id)
+                counts = Counter(total_rounds=len(trees), eligible_rounds=len(events), prompts=1,
+                                 prompts_with_shift=int(any(e["longest_shift"] for e in events)))
+                counts.update(skipped)
+                for event in events:
+                    counts.update(same_rounds=bool(event["longest_same"]), shifted_rounds=bool(event["longest_shift"]),
+                                  either_rounds=bool(event["matches"]),
+                                  shift_only_rounds=bool(event["longest_shift"]) and not event["longest_same"])
+                    counts.update({k: v for k, v in event.items() if k.startswith(("next_tree_", "has_shift_"))
+                                   or k.endswith(("_positions", "_tokens"))})
+                    for n in (4, 5, 6, 8, 10):
+                        counts[f"same_ge{n}"] += event["longest_same"] >= n
+                        counts[f"shifted_ge{n}"] += event["longest_shift"] >= n
+                for group in ("all", dataset):
+                    totals[group].update(counts)
+                for handle, label, entries in ((trees_file, "trees", trees), (reuse_file, "events", events)):
+                    handle.write(json.dumps(dict(id=item["id"], dataset=dataset, **{label: entries}),
+                                            separators=(",", ":")) + "\n")
+                    handle.flush()
+                json_file(output / f"{method}_reuse_summary.json", reuse_summary(totals))
             file.write(json.dumps(row, ensure_ascii=False) + "\n")
             file.flush()
             rows.append(row)
@@ -346,10 +588,19 @@ def worker(args):
     from model.recycling.kv_cache import KVCache as RecyclingCache
     from model.recycling.tree_template_ import choose_tree_template
 
-    math_path = Path(hf_hub_download("HuggingFaceH4/MATH-500", "test.jsonl", repo_type="dataset",
-                                     revision=MATH_REVISION))
+    saved_ar = None
     human_path = rest / "human_eval" / "HumanEval.jsonl.gz"
-    plan = load_plan(math_path, human_path, args.smoke)
+    if args.reuse_reference:
+        plan, saved_ar = read_reference(args.reuse_reference)
+        if args.smoke:
+            plan = [{**p, "limit": 64} for dataset in LIMITS for p in
+                    [item for item in plan if item["dataset"] == dataset][:2]]
+        limits = {p["id"]: p["limit"] for p in plan}
+        saved_ar = [r for r in saved_ar if r["id"] in limits]
+    else:
+        math_path = Path(hf_hub_download("HuggingFaceH4/MATH-500", "test.jsonl", repo_type="dataset",
+                                         revision=MATH_REVISION))
+        plan = load_plan(math_path, human_path, args.smoke)
     output = Path(tempfile.mkdtemp(prefix="smoke-" if args.smoke else "full-", dir=args.output))
     print(f"Result files: {output}", flush=True)
     json_file(output / "prompts.json", plan)
@@ -357,7 +608,10 @@ def worker(args):
                                                                                  "pytorch_model-*.bin"])
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     for item in plan:
-        item["prompt_tokens"] = len(tokenizer.encode(item["prompt"]))
+        count = len(tokenizer.encode(item["prompt"]))
+        if saved_ar is not None and item["prompt_tokens"] != count:
+            raise ValueError(f"Tokenized prompt length changed for {item['id']}")
+        item["prompt_tokens"] = count
         if item["prompt_tokens"] + item["limit"] + 82 > 2048:
             raise ValueError(f"{item['id']} exceeds the shared Vicuna context window")
     json_file(output / "prompts.json", plan)
@@ -379,6 +633,13 @@ def worker(args):
         "torch": torch.__version__, "cuda": torch.version.cuda,
         "temperature": 0, "warmup_prompts": WARMUPS, "warmup_token_budget": 32,
         "recycling_state": "zero after warmup and across datasets, retained within each dataset",
+        "archived_ar_and_tree_trace": saved_ar is not None,
+        "archived_ar_hashes": REFERENCE_HASHES if saved_ar is not None else None,
+        "reuse_policy": {"target_lookahead": 10, "minimum_exact_span": 4,
+                         "source": "each leaf tail after its first node outside the accepted path",
+                         "destination": "after the current native accepted path, on a common AR prefix",
+                         "analysis": "offline oracle; no attempt to reinsert spans or generate bridges",
+                         "timing": "tree capture includes extra device synchronization"} if saved_ar is not None else None,
         "native_stop_policy": "native calls keep their stop logic; recycling gets one extra iteration for the prompt root",
         "rest": {"nodes": 64, "suffix_lengths": [16, 2], "max_continuation": 10},
         "recycling": {"top_k": 8, "tree": "2.2.2", "draft_nodes": 80},
@@ -386,8 +647,16 @@ def worker(args):
     options = {"torch_dtype": torch.float16, "low_cpu_mem_usage": True, "device_map": placement,
                "local_files_only": True}
 
+    reference = {r["id"]: r for r in saved_ar} if saved_ar is not None else None
+    if reference is not None:
+        with (output / "ar.jsonl").open("w", encoding="utf-8") as file:
+            for item in plan:
+                row = reference[item["id"]]
+                file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
     def run_arm(method):
         reset = None
+        trace = TreeTrace() if reference is not None else None
         if method == "ar":
             model = AutoModelForCausalLM.from_pretrained(model_path, **options).eval()
 
@@ -406,6 +675,7 @@ def worker(args):
             author_forward = author_function(rest / "llm_judge" / "gen_model_answer_rest.py", "rest_forward", {
                 **vars(rest_utils), "torch": torch, "time": time, "update_inference_inputs": update,
                 "initialize_past_key_values": lambda model: allocate_cache(torch, model, RestCache, capacity),
+                **({"record_tree": trace.rest} if trace else {}),
             })
 
             def forward(ids, limit):
@@ -424,6 +694,7 @@ def worker(args):
                     torch, model, RecyclingCache, capacity
                 ),
                 "choose_tree_template": choose_tree_template, "adj_matrix": adjacency, "compact_cache": compact_cache,
+                **({"record_tree": trace.recycling} if trace else {}),
             })
 
             def forward(ids, limit):
@@ -434,23 +705,33 @@ def worker(args):
                 return output_ids, count, lengths
 
         with torch.inference_mode():
-            return measure(torch, tokenizer, forward, method, plan, output, devices, reset)
+            return measure(torch, tokenizer, forward, method, plan, output, devices, reset, trace, reference)
 
     results = {}
     try:
-        for method in METHODS:
+        for method in METHODS if reference is None else ("rest", "recycling"):
             for device in devices:
                 with torch.cuda.device(device):
                     torch.cuda.empty_cache()
             results[method] = run_arm(method)
             gc.collect()
-        json_file(output / "summary.json", {"status": "complete", **summary(results)})
+        if reference is None:
+            report = summary(results)
+        else:
+            report = {"reuse": {m: json.loads((output / f"{m}_reuse_summary.json").read_text(encoding="utf-8"))
+                                for m in results},
+                      "exact_vs_archived_ar": {m: sum(
+                          r["token_ids"] == reference[r["id"]]["token_ids"][:r["limit"]] for r in rows)
+                          for m, rows in results.items()}}
+        json_file(output / "summary.json", {"status": "complete", **report})
         print(f"Completed: {output / 'summary.json'}", flush=True)
     except torch.cuda.OutOfMemoryError as exc:
         json_file(output / "execution_status.json", {
             "status": "partial_cuda_oom", "completed_methods": list(results), "failed_method": method, "error": str(exc)
         })
         print(f"INCOMPLETE: CUDA ran out of memory. Partial results preserved. {exc}", flush=True)
+        if reference is not None:
+            raise
     finally:
         archive = shutil.make_archive(str(output), "zip", root_dir=output)
         print(f"Results archive: {archive}", flush=True)
@@ -461,8 +742,12 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="Run 2 questions per dataset at a 64-token limit")
     parser.add_argument("--work", type=lambda x: Path(x).resolve(), required=True)
     parser.add_argument("--output", type=lambda x: Path(x).resolve(), required=True)
+    parser.add_argument("--reuse-reference", type=lambda x: Path(x).resolve(),
+                        help="Replay only the two speculative arms and save tree traces using the archived AR run")
     parser.add_argument("--worker", nargs=2, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.reuse_reference and not args.worker:
+        read_reference(args.reuse_reference)
     (worker if args.worker else launch)(args)
 
 
