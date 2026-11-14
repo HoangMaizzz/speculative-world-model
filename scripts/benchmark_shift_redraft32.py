@@ -80,13 +80,20 @@ def select_cases(rows, eos, limit, length):
 
 
 def source_features(target, case):
-    from suffix_lab.runtime import ARSession
+    import torch
+    from suffix_lab.runtime import describe_logits, sync_model
 
-    stats = ARSession(target).score(case["source_prefix"], case["source_proposal"], top_k=2)
+    prefix, proposal = case["source_prefix"], case["source_proposal"]
+    prefill = target(torch.tensor([prefix], device=target.device), use_cache=True, logits_to_keep=1)
+    scored = target(torch.tensor([proposal], device=target.device),
+                    past_key_values=prefill.past_key_values, use_cache=True, logits_to_keep=len(proposal))
     start = case["source_start"]
     stop = start + len(case["old"])
-    return {name: stats[name][start:stop] for name in
-            ("probability", "top1_probability", "logit_margin", "entropy", "top1")}
+    # The rejected token is at start-1, and its row predicts the first suffix token.
+    logits = scored.logits[0, start - 1:stop - 1].float()
+    stats = describe_logits(logits, case["old"], top_k=2)
+    sync_model(target)
+    return {name: stats[name] for name in ("probability", "top1_probability", "logit_margin", "entropy", "top1")}
 
 
 def candidate_rows(case, feedback):
@@ -178,34 +185,84 @@ def keep_plans(case, prediction):
                     strict=True)), spans, placed, remasked
 
 
-def window_attention(inner):
-    native_mask = inner.eval_mask
+class CachedDrafter:
+    """Cache complete prefix blocks before the first prediction row, never the draft."""
 
-    def eval_mask(self, length, block_size, cache_length):
-        if cache_length or length <= 32:
-            raise ValueError("Expected a full prefix plus a 32-position draft with no draft KV cache")
-        mask = native_mask(length, block_size, cache_length)
-        boundary = length - 32
-        # Prefix queries cannot see draft tokens except the predecessor row used to predict slot 0.
-        mask[:boundary - 1, boundary:] = False
-        mask[boundary - 1:, :] = True
+    def __init__(self, model, block_size, mask_id):
+        self.model, self.block_size, self.mask_id = model, block_size, mask_id
+        self.native_mask = model.model.eval_mask
+        self.redrafting = False
+        model.model.eval_mask = MethodType(self.eval_mask, model.model)
+
+    def eval_mask(self, _inner, length, block_size, cache_length):
+        mask = self.native_mask(length, block_size, cache_length)
+        if self.redrafting:
+            if length <= 32 or cache_length % block_size:
+                raise ValueError("Invalid cached-prefix/draft boundary")
+            boundary = length - 32
+            # Query rows are local; key columns include the previously cached blocks.
+            mask[:boundary - 1, cache_length + boundary:] = False
+            mask[boundary - 1:, :] = True
         return mask
 
-    inner.eval_mask = MethodType(eval_mask, inner)
+    def prepare(self, prefix):
+        import torch
 
+        # The last prefix row predicts draft slot 0 and must still see the anchors.
+        cached = (len(prefix) - 1) // self.block_size * self.block_size
+        cache = None
+        if cached:
+            output = self.model(torch.tensor([prefix[:cached]], device=self.model.device),
+                                block_size=self.block_size, use_cache=True, use_block_cache=False,
+                                update_past_key_values=True, logits_to_keep=1)
+            cache = output.past_key_values
+            if cache.get_seq_length() != cached:
+                raise RuntimeError("Drafter prefix KV has the wrong length")
+        return cache, prefix[cached:], cached
 
-def draft_once(model, prefix, anchors, block_size, mask_id):
-    import torch
+    def logits(self, state, anchors):
+        import torch
 
-    canvas = [anchors.get(j, mask_id) for j in range(32)]
-    ids = torch.tensor([prefix + canvas], device=model.device)
-    output = model(ids, block_size=block_size, use_cache=False, use_block_cache=False, logits_to_keep=33)
-    logits = output.logits[0, :32]
-    if logits.shape[0] != 32:
-        raise RuntimeError("Expected 32 shifted logit rows in one drafter call")
-    logits[:, mask_id] = -torch.inf
-    proposed = logits.argmax(-1).tolist()
-    return [anchors.get(j, token) for j, token in enumerate(proposed)]
+        cache, tail, cached = state
+        canvas = [anchors.get(j, self.mask_id) for j in range(32)]
+        ids = torch.tensor([tail + canvas], device=self.model.device)
+        self.redrafting = True
+        try:
+            output = self.model(ids, block_size=self.block_size, past_key_values=cache,
+                                use_cache=cache is not None, use_block_cache=False,
+                                update_past_key_values=False, logits_to_keep=33)
+        finally:
+            self.redrafting = False
+        if cache is not None and cache.get_seq_length() != cached:
+            raise RuntimeError("Draft forward modified the shared prefix cache")
+        logits = output.logits[0, :32]
+        if logits.shape[0] != 32:
+            raise RuntimeError("Expected 32 shifted logit rows in one drafter call")
+        return logits
+
+    def draft(self, state, anchors):
+        import torch
+
+        logits = self.logits(state, anchors)
+        logits[:, self.mask_id] = -torch.inf
+        proposed = logits.argmax(-1).tolist()
+        return [anchors.get(j, token) for j, token in enumerate(proposed)]
+
+    def audit(self, cases):
+        audit = []
+        for case in cases:
+            prefix = case["prefix"]
+            state = self.prepare(prefix)
+            for keep in ({}, {0: case["future"][0], 31: case["future"][-1]}):
+                cached = self.logits(state, keep).float()
+                full = self.logits((None, prefix, 0), keep).float()
+                cached[:, self.mask_id] = full[:, self.mask_id] = 0
+                delta = (cached - full).abs().max().item()
+                cached[:, self.mask_id] = full[:, self.mask_id] = -float("inf")
+                different = (cached.argmax(-1) != full.argmax(-1)).nonzero().flatten().tolist()
+                audit.append(dict(id=case["id"], prefix_tokens=len(prefix), cached_tokens=state[2],
+                                  anchors=keep, max_logit_delta=delta, different_top1_positions=different))
+        return audit
 
 
 def reference_decision(proposal, gold, eos, remaining):
@@ -222,13 +279,17 @@ def reference_decision(proposal, gold, eos, remaining):
     return decision
 
 
-def run_case(case, prediction, drafter, target, eos, block_size, mask_id):
+def run_case(case, prediction, drafter, target, eos):
     from benchmark_dllm_ar32 import CachedTarget
     from suffix_lab.long60_plan import decide, matching_runs, until_eos
     from suffix_lab.runtime import sync, sync_model
 
     plans, spans, placed, remasked = keep_plans(case, prediction)
     prefix = case["prefix"]
+    start = perf_counter()
+    state = drafter.prepare(prefix)
+    sync(drafter.model.device)
+    draft_prefix_ms = 1000 * (perf_counter() - start)
     start = perf_counter()
     verifier = CachedTarget(target, prefix)
     sync_model(target)
@@ -237,10 +298,10 @@ def run_case(case, prediction, drafter, target, eos, block_size, mask_id):
     random.Random(case["id"]).shuffle(order)
     for name in order:
         keep = plans[name]
-        sync(drafter.device)
+        sync(drafter.model.device)
         start = perf_counter()
-        tokens = draft_once(drafter, prefix, keep, block_size, mask_id)
-        sync(drafter.device)
+        tokens = drafter.draft(state, keep)
+        sync(drafter.model.device)
         draft_ms = 1000 * (perf_counter() - start)
         proposal = until_eos(tokens[:case["remaining"]], eos)
         start = perf_counter()
@@ -271,6 +332,9 @@ def run_case(case, prediction, drafter, target, eos, block_size, mask_id):
                                  for j in range(span["destination_start"], span["destination_end"])})
     return dict(id=case["id"], dataset=case["dataset"], source_round=case["round"],
                 old_suffix=case["old"], gold=case["gold"], prefix_ms=prefix_ms, model=prediction,
+                draft_prefix_ms=draft_prefix_ms, draft_cached_prefix_tokens=state[2],
+                draft_prefix_forwards=int(state[0] is not None), draft_input_tokens=len(state[1]) + 32,
+                verify_cached_prefix_tokens=len(prefix),
                 model_placed=placed, oracle_spans=spans, oracle_exact_destinations=exact_destinations,
                 arms=results)
 
@@ -284,7 +348,11 @@ def summarize(rows):
     for name, subset in groups.items():
         if not subset:
             continue
-        out[name] = {"cases": len(subset), "mean_shared_prefix_ms": mean(r["prefix_ms"] for r in subset)}
+        out[name] = dict(cases=len(subset), mean_shared_prefix_ms=mean(r["prefix_ms"] for r in subset),
+                         mean_shared_draft_prefix_ms=mean(r["draft_prefix_ms"] for r in subset),
+                         mean_draft_cached_prefix_tokens=mean(r["draft_cached_prefix_tokens"] for r in subset),
+                         mean_draft_input_tokens=mean(r["draft_input_tokens"] for r in subset),
+                         mean_verify_cached_prefix_tokens=mean(r["verify_cached_prefix_tokens"] for r in subset))
         for arm in ARMS:
             a = [r["arms"][arm] for r in subset]
             deltas = [r["arms"][arm]["accepted"] - r["arms"]["fresh"]["accepted"] for r in subset]
@@ -354,19 +422,27 @@ def run(args):
         raise ValueError("Model revisions or MASK differ from the source run")
     target, _, _ = load_target(paths[TARGET], config)
     target._suffix_exclude_peer_transfers = False
-    drafter = load_model(paths[DLLM], "cuda:1")
-    window_attention(drafter.model)
+    drafter = CachedDrafter(load_model(paths[DLLM], "cuda:1"), config["physical_block_size"], config["mask_id"])
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
-    manifest = dict(protocol="paired-one-step-shift-redraft32", cases_hash=CASE_HASH, models=revisions,
+    manifest = dict(protocol="paired-one-step-shift-redraft32-cached", cases_hash=CASE_HASH, models=revisions,
                     script_sha256=sha256(Path(__file__).read_bytes()).hexdigest(), torch=torch.__version__,
                     cuda=torch.version.cuda, gpus=[torch.cuda.get_device_name(i) for i in range(2)],
                     draft_length=32, steps=1, attention="all 32 prediction rows see full draft canvas",
+                    draft_cache="read-only complete prefix blocks before first prediction row",
+                    verify_cache="full shared prefix; crop after each arm",
                     model="5-fold held-out HGB, highest expected correct minus wrong, one placement per case",
                     timing="paired draft/verify GPU wall; prefix and offline oracle/model costs excluded")
     store = Store(output / "checkpoint.sqlite", manifest)
     try:
         with torch.inference_mode():
+            phases = {}
+            for case in cases:
+                phases.setdefault(len(case["prefix"]) % config["physical_block_size"], case)
+            audit = drafter.audit([phases[p] for p in sorted(phases)[::7]])
+            atomic_json(output / "cache_audit.json", audit)
+            print(f"Cached/full audit: {len(audit)} comparisons, "
+                  f"{sum(bool(r['different_top1_positions']) for r in audit)} with top-1 differences", flush=True)
             records = {}
             for index, case in enumerate(cases, 1):
                 key = case["id"]
@@ -381,11 +457,9 @@ def run(args):
             predictions = predicted_anchors(cases, records)
             pending = [c for c in cases if store.get("case", c["id"]) is None]
             if pending:
-                run_case(pending[0], predictions[pending[0]["id"]], drafter, target, eos,
-                         config["physical_block_size"], config["mask_id"])
+                run_case(pending[0], predictions[pending[0]["id"]], drafter, target, eos)
             for index, c in enumerate(pending, len(cases) - len(pending) + 1):
-                result = run_case(c, predictions[c["id"]], drafter, target, eos,
-                                  config["physical_block_size"], config["mask_id"])
+                result = run_case(c, predictions[c["id"]], drafter, target, eos)
                 store.put("case", c["id"], result)
                 print(f"{index}/{len(cases)} {c['id']} | accept " + " / ".join(
                     str(result["arms"][name]["accepted"]) for name in ARMS), flush=True)
@@ -402,6 +476,8 @@ def run(args):
         with ZipFile(temporary, "w", ZIP_DEFLATED) as archive:
             for name in ("summary.json", "cases.jsonl", "checkpoint.sqlite"):
                 archive.write(output / name, name)
+            if (output / "cache_audit.json").is_file():
+                archive.write(output / "cache_audit.json", "cache_audit.json")
         temporary.replace(output / "shift_redraft32_results.zip")
     print(json.dumps(summary["metrics"], indent=2), flush=True)
 
