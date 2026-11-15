@@ -59,6 +59,14 @@ class ARReuseTests(unittest.TestCase):
             self.assertEqual(result["token_ids"], anticipated)
             self.assertTrue(result["rounds"][-1]["decision"]["terminated"])
 
+    def test_single_64_token_proposal_with_one_verification(self):
+        with patch.object(CachedTarget, "forward", fake_forward):
+            result = decode_spec(len, len, [99], set(), 65, 64, lambda model: None)
+        step, = result["rounds"]
+        self.assertEqual(step["proposal"], list(range(1, 65)))
+        self.assertEqual(step["draft_forwards"], 63)  # The prompt prefill supplies the first prediction.
+        self.assertEqual(step["decision"]["bonus"], 65)
+
     def test_exact_shift_union_and_next_round(self):
         gold = [90, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         first = dict(offset=0, proposal=[99, 8, 1, 2, 3, 4, 6, 7, 8, 9],
@@ -81,6 +89,17 @@ class ARReuseTests(unittest.TestCase):
         mismatch = diagnose(dict(spec, token_ids=[98] + gold[1:]), gold, set(), 10)
         self.assertEqual(mismatch["attrition"]["after_ar_divergence"], 2)
         self.assertFalse(mismatch["events"])
+
+    def test_64_token_reference_finds_a_span_beyond_32(self):
+        future = list(range(100, 164))
+        gold = [90] + future
+        proposal = [91] + [777] * 4 + future[42:47] + [777] * 54
+        step = dict(offset=0, proposal=proposal,
+                    decision=dict(first_rejection=0, committed_tokens=[90], terminated=False))
+        spec = dict(token_ids=gold, rounds=[step])
+        self.assertFalse(diagnose(spec, gold, set(), 32)["events"][0]["runs"])
+        run, = diagnose(spec, gold, set(), 64)["events"][0]["runs"]
+        self.assertEqual((run["destination_start"], run["length"], run["delta"]), (42, 5, 38))
 
 
 if __name__ == "__main__":

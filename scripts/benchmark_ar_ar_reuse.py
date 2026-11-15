@@ -16,7 +16,7 @@ from benchmark_dllm_ar32 import CachedTarget, decode_ar, first_difference
 
 
 DATASETS = ("math500", "gsm8k")
-HORIZONS = (10, 32)
+HORIZONS = (10, 32, 64)
 MINIMUM = 4
 RADII = (1, 4, 8, 16)
 ARCHIVE = "ar_ar_reuse_results.zip"
@@ -359,8 +359,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--revision", default="local")
     parser.add_argument("--count", type=int, default=100, help="Questions per dataset")
-    parser.add_argument("--draft-length", type=int, default=32)
-    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument("--draft-length", type=int, default=64, help="Maximum proposal tokens per verify round")
+    parser.add_argument("--max-new-tokens", type=int, default=256, help="Output token budget per question")
     parser.add_argument("--kaggle", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.count <= 100 or not 5 <= args.draft_length <= 64 or args.max_new_tokens < 1:
