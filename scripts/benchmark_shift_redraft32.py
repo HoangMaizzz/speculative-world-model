@@ -96,11 +96,11 @@ def source_features(target, case):
     return {name: stats[name] for name in ("probability", "top1_probability", "logit_margin", "entropy", "top1")}
 
 
-def candidate_rows(case, feedback):
+def candidate_rows(case, feedback, horizon_limit=32):
     old = case["old"]
     candidates, features = [], []
     # Destinations depend on the canvas and output cap, never on the reference EOS.
-    horizon = min(32, case["remaining"])
+    horizon = min(horizon_limit, case["remaining"])
     for length in range(4, min(8, len(old), horizon) + 1):
         for i in range(len(old) - length + 1):
             span = old[i:i + length]
@@ -188,8 +188,9 @@ def keep_plans(case, prediction):
 class CachedDrafter:
     """Cache complete prefix blocks before the first prediction row, never the draft."""
 
-    def __init__(self, model, block_size, mask_id):
+    def __init__(self, model, block_size, mask_id, draft_length=32):
         self.model, self.block_size, self.mask_id = model, block_size, mask_id
+        self.draft_length = draft_length
         self.native_mask = model.model.eval_mask
         self.redrafting = False
         model.model.eval_mask = MethodType(self.eval_mask, model.model)
@@ -197,9 +198,9 @@ class CachedDrafter:
     def eval_mask(self, _inner, length, block_size, cache_length):
         mask = self.native_mask(length, block_size, cache_length)
         if self.redrafting:
-            if length <= 32 or cache_length % block_size:
+            if length <= self.draft_length or cache_length % block_size:
                 raise ValueError("Invalid cached-prefix/draft boundary")
-            boundary = length - 32
+            boundary = length - self.draft_length
             # Query rows are local; key columns include the previously cached blocks.
             mask[:boundary - 1, cache_length + boundary:] = False
             mask[boundary - 1:, :] = True
@@ -224,20 +225,20 @@ class CachedDrafter:
         import torch
 
         cache, tail, cached = state
-        canvas = [anchors.get(j, self.mask_id) for j in range(32)]
+        canvas = [anchors.get(j, self.mask_id) for j in range(self.draft_length)]
         ids = torch.tensor([tail + canvas], device=self.model.device)
         self.redrafting = True
         try:
             output = self.model(ids, block_size=self.block_size, past_key_values=cache,
                                 use_cache=cache is not None, use_block_cache=False,
-                                update_past_key_values=False, logits_to_keep=33)
+                                update_past_key_values=False, logits_to_keep=self.draft_length + 1)
         finally:
             self.redrafting = False
         if cache is not None and cache.get_seq_length() != cached:
             raise RuntimeError("Draft forward modified the shared prefix cache")
-        logits = output.logits[0, :32]
-        if logits.shape[0] != 32:
-            raise RuntimeError("Expected 32 shifted logit rows in one drafter call")
+        logits = output.logits[0, :self.draft_length]
+        if logits.shape[0] != self.draft_length:
+            raise RuntimeError("Unexpected number of shifted logit rows in one drafter call")
         return logits
 
     def draft(self, state, anchors):
@@ -253,7 +254,7 @@ class CachedDrafter:
         for case in cases:
             prefix = case["prefix"]
             state = self.prepare(prefix)
-            for keep in ({}, {0: case["future"][0], 31: case["future"][-1]}):
+            for keep in ({}, {0: case["future"][0], self.draft_length - 1: case["future"][-1]}):
                 cached = self.logits(state, keep).float()
                 full = self.logits((None, prefix, 0), keep).float()
                 cached[:, self.mask_id] = full[:, self.mask_id] = 0
@@ -280,11 +281,25 @@ def reference_decision(proposal, gold, eos, remaining):
 
 
 def run_case(case, prediction, drafter, target, eos):
-    from benchmark_dllm_ar32 import CachedTarget
-    from suffix_lab.long60_plan import decide, matching_runs, until_eos
-    from suffix_lab.runtime import sync, sync_model
+    from suffix_lab.long60_plan import matching_runs
 
     plans, spans, placed, remasked = keep_plans(case, prediction)
+    result = evaluate_arms(case, plans, drafter, target, eos)
+    result["arms"][ARMS[2]]["remasked"] = remasked
+    result["arms"][ARMS[2]]["remasked_correct"] = sum(
+        j < len(case["future"]) and result["arms"][ARMS[2]]["draft"][j] == case["future"][j]
+        for j in remasked)
+    exact_destinations = sorted({j for span in matching_runs(case["old"], case["future"], 31)
+                                 for j in range(span["destination_start"], span["destination_end"])})
+    return dict(result, model=prediction, model_placed=placed, oracle_spans=spans,
+                oracle_exact_destinations=exact_destinations)
+
+
+def evaluate_arms(case, plans, drafter, target, eos):
+    from benchmark_dllm_ar32 import CachedTarget
+    from suffix_lab.long60_plan import decide, until_eos
+    from suffix_lab.runtime import sync, sync_model
+
     prefix = case["prefix"]
     start = perf_counter()
     state = drafter.prepare(prefix)
@@ -294,7 +309,7 @@ def run_case(case, prediction, drafter, target, eos):
     verifier = CachedTarget(target, prefix)
     sync_model(target)
     prefix_ms = 1000 * (perf_counter() - start)
-    order, results = list(ARMS), {}
+    order, results = list(plans), {}
     random.Random(case["id"]).shuffle(order)
     for name in order:
         keep = plans[name]
@@ -317,9 +332,7 @@ def run_case(case, prediction, drafter, target, eos):
         accepted = canonical["accepted_draft"]
         first_anchor = min(keep) if keep else None
         results[name] = dict(draft=tokens, verified_length=len(proposal), keep=keep,
-                             remasked=remasked if name == ARMS[2] else [],
-                             remasked_correct=sum(j < len(case["future"]) and tokens[j] == case["future"][j]
-                                                  for j in remasked) if name == ARMS[2] else 0,
+                             remasked=[], remasked_correct=0,
                              draft_forwards=1, verify_forwards=1, draft_ms=draft_ms, verify_ms=verify_ms,
                              accepted=accepted, committed=len(canonical["committed_tokens"]),
                              native_accepted=decision["accepted_draft"],
@@ -328,14 +341,11 @@ def run_case(case, prediction, drafter, target, eos):
                              bridge_tokens=first_anchor,
                              bridge_accepted=first_anchor is not None and accepted >= first_anchor,
                              passed_last_anchor=bool(keep) and max(keep) < accepted)
-    exact_destinations = sorted({j for span in matching_runs(case["old"], case["future"], 31)
-                                 for j in range(span["destination_start"], span["destination_end"])})
     return dict(id=case["id"], dataset=case["dataset"], source_round=case["round"],
-                old_suffix=case["old"], gold=case["gold"], prefix_ms=prefix_ms, model=prediction,
+                old_suffix=case["old"], gold=case["gold"], prefix_ms=prefix_ms,
                 draft_prefix_ms=draft_prefix_ms, draft_cached_prefix_tokens=state[2],
-                draft_prefix_forwards=int(state[0] is not None), draft_input_tokens=len(state[1]) + 32,
+                draft_prefix_forwards=int(state[0] is not None), draft_input_tokens=len(state[1]) + drafter.draft_length,
                 verify_cached_prefix_tokens=len(prefix),
-                model_placed=placed, oracle_spans=spans, oracle_exact_destinations=exact_destinations,
                 arms=results)
 
 
