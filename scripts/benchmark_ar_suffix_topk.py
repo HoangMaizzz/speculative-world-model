@@ -81,7 +81,7 @@ def tally(rows):
     return result
 
 
-def replay_case(model, prompt, case, max_k, eos):
+def replay_case(model, prompt, case, max_k, eos, max_new_tokens):
     import torch
     from suffix_lab.long60_plan import decide
 
@@ -94,7 +94,6 @@ def replay_case(model, prompt, case, max_k, eos):
     prefill = model(torch.tensor([prefix], device=device), past_key_values=None,
                     use_cache=True, logits_to_keep=1)
     cache = prefill.past_key_values
-    next_token = int(prefill.logits[0, -1].argmax())
     pending = []
     records = []
     for round_index, saved in enumerate(rounds):
@@ -118,7 +117,7 @@ def replay_case(model, prompt, case, max_k, eos):
             raise AssertionError("Verifier row alignment failed")
         top1 = rows.argmax(-1).tolist()
         top1_bonus = [*top1, int(bonus.argmax())]
-        decision = decide(proposal, top1_bonus, eos, len(reference) - offset)
+        decision = decide(proposal, top1_bonus, eos, max_new_tokens - offset)
         for key in ("accepted_draft", "first_rejection", "correction", "bonus", "committed_tokens"):
             if decision[key] != saved["decision"][key]:
                 raise AssertionError(f"Replay mismatch {case['id']} round={round_index} field={key}: {decision[key]} != {saved['decision'][key]}")
@@ -199,7 +198,8 @@ def run(args):
         for index, case in enumerate(cases):
             if case["id"] in done:
                 continue
-            records = replay_case(model, prompts[case["id"]], case, args.max_k, eos)
+            records = replay_case(model, prompts[case["id"]], case, args.max_k, eos,
+                                  manifest["max_new_tokens"])
             sync_model(model)
             item = {"case_id": case["id"], "dataset": case["dataset"], "rows": records}
             out.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
