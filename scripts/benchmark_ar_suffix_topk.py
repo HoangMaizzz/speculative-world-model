@@ -66,6 +66,8 @@ def tally(rows):
         groups[("all", "all")].append(row)
         groups[("all", row["distance_bucket"])].append(row)
         if row["distance_after_reject"]:
+            groups[(row["dataset"], "after_reject")].append(row)
+            groups[("all", "after_reject")].append(row)
             groups[("all", "reusable" if row["source_reusable_anywhere4"] else "other")].append(row)
     result = []
     for (dataset, group), items in sorted(groups.items()):
@@ -135,6 +137,12 @@ def replay_case(model, prompt, case, max_k, eos, max_new_tokens):
             top_ids = ranked_ids.tolist()
             top_values = selected.gather(1, ranked_ids)
             normalizer = selected.logsumexp(-1)
+            old_ids = torch.tensor([proposal[i] for i in positions], device=selected.device)[:, None]
+            ref_ids = torch.tensor([reference[offset + i] if offset + i < len(reference) else 0
+                                    for i in positions], device=selected.device)[:, None]
+            old_probs = (selected.gather(1, old_ids).squeeze(1) - normalizer).exp().tolist()
+            ref_probs = (selected.gather(1, ref_ids).squeeze(1) - normalizer).exp().tolist()
+            top_probs = (top_values - normalizer[:, None]).exp().tolist()
             for local, position in enumerate(positions):
                 target_position = offset + position
                 ref = reference[target_position] if target_position < len(reference) else None
@@ -151,9 +159,9 @@ def replay_case(model, prompt, case, max_k, eos, max_new_tokens):
                                     source_reusable_anywhere4=(position > reject and position - reject - 1 in reusable),
                                     old_rank_le32=ranks[old],
                                     reference_rank_le32=ranks.get(ref) if ref is not None else None,
-                                    old_probability=float((selected[local, old] - normalizer[local]).exp()),
-                                    reference_probability=(float((selected[local, ref] - normalizer[local]).exp()) if ref is not None else None),
-                                    topk_ids=ids, topk_probabilities=(top_values[local] - normalizer[local]).exp().tolist()))
+                                    old_probability=old_probs[local],
+                                    reference_probability=(ref_probs[local] if ref is not None else None),
+                                    topk_ids=ids, topk_probabilities=top_probs[local]))
         accepted = min(decision["accepted_draft"], len(decision["committed_tokens"]))
         cache.crop(base + len(pending) + accepted)
         pending = decision["committed_tokens"][accepted:]
